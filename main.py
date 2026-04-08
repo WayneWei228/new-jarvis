@@ -1,20 +1,18 @@
 """
-Brainiest Mind - Main Entry Point
+Jarvis — Proactive AI Assistant
 
-INPUT (camera + audio + browser) → LLM Analysis → 用户状态描述
+Event-driven architecture:
+  INPUT (camera + desktop + audio + browser)
+    → Reactor (single LLM call: perceive + think + act)
+      → Native Overlay (floating macOS panel)
+
+Two response modes:
+  - IMMEDIATE: user speaks → react in 3-5s
+  - PERIODIC: background observation every 10s
 
 Usage:
-    cd brainiest-mind
     source .venv/bin/activate
     python main.py
-
-    # Analyze every 30s (default):
-    python main.py
-
-    # Faster analysis cycle:
-    python main.py --analysis-interval 15
-
-    # No camera:
     python main.py --no-camera
 """
 
@@ -26,7 +24,6 @@ import logging
 import os
 import signal
 import sys
-import time
 from pathlib import Path
 
 # Load .env from project root
@@ -43,9 +40,8 @@ if _ENV_PATH.exists():
 sys.path.insert(0, str(Path(__file__).parent))
 
 from input import InputCollector
-from analysis import LLMAnalysis
-from brain import Brain
-from executor import Executor, NativeOverlay
+from reactor import Reactor
+from executor import NativeOverlay
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,52 +51,19 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
-async def print_events_loop(collector: InputCollector, interval: float = 5.0):
-    """Periodically print a summary of recent events."""
-    last_check = time.time()
-
-    while True:
-        await asyncio.sleep(interval)
-        now = time.time()
-        events = collector.get_events(since=last_check)
-        last_check = now
-
-        if not events:
-            continue
-
-        logger.info(f"--- {len(events)} new events ---")
-        for e in events:
-            if e.source == "chrome_history":
-                title = e.data.get("title", "?")[:50]
-                url = e.data.get("url", "?")[:60]
-                logger.info(f"  [BROWSER] {title} — {url}")
-            elif e.source == "microphone":
-                text = e.data.get("text", "")[:80]
-                logger.info(f"  [AUDIO] {text}")
-            elif e.source == "camera":
-                logger.info(f"  [CAMERA] frame captured")
-            elif e.source == "desktop":
-                logger.info(f"  [DESKTOP] screenshot captured")
-            elif e.source == "executor":
-                action = e.data.get("action", "?")
-                status = e.data.get("status", "?")
-                logger.info(f"  [FEEDBACK] {action} → {status}")
-
-
 async def main(args):
     logger.info("=" * 50)
-    logger.info("  Brainiest Mind")
-    logger.info("  INPUT → LLM Analysis → 状态描述")
+    logger.info("  Jarvis — Proactive AI Assistant")
+    logger.info("  INPUT → Reactor → Overlay")
     logger.info("=" * 50)
     logger.info(f"  Camera:   {'ON' if args.camera else 'OFF'}")
     logger.info(f"  Desktop:  {'ON' if args.desktop else 'OFF'}")
     logger.info(f"  Audio:    {'ON' if args.audio else 'OFF'}")
     logger.info(f"  Browser:  {'ON' if args.browser else 'OFF'}")
-    logger.info(f"  Analysis: every {args.analysis_interval}s")
-    logger.info(f"  Brain:    every {args.brain_interval}s")
+    logger.info(f"  Periodic: every {args.periodic}s")
     logger.info("=" * 50)
 
-    # 1. Native Overlay (floating window)
+    # 1. Native Overlay
     overlay = NativeOverlay()
     overlay.start()
 
@@ -116,20 +79,12 @@ async def main(args):
         audio_language=args.language,
     )
 
-    # 3. LLM Analysis
-    analysis = LLMAnalysis(
+    # 3. Reactor (replaces Analysis + Brain + Executor)
+    reactor = Reactor(
         collector=collector,
-        interval_sec=args.analysis_interval,
-        max_frames=2,
+        overlay=overlay,
+        periodic_interval=args.periodic,
     )
-
-    # 4. Brain — continuous reasoning
-    brain = Brain(
-        interval_sec=args.brain_interval,
-    )
-
-    # 5. Executor (watches decisions → executes → shows overlay)
-    executor = Executor(overlay=overlay)
 
     # Handle Ctrl+C
     stop_event = asyncio.Event()
@@ -142,47 +97,35 @@ async def main(args):
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, handle_signal)
 
-    # Start everything
+    # Start
     await collector.start()
-    tasks = [
-        asyncio.create_task(print_events_loop(collector, interval=args.print_interval)),
-        asyncio.create_task(analysis.start()),
-        asyncio.create_task(brain.start()),
-        asyncio.create_task(executor.start()),
-    ]
+    reactor_task = asyncio.create_task(reactor.start())
 
     # Wait until Ctrl+C
     await stop_event.wait()
 
     # Cleanup
-    for t in tasks:
-        t.cancel()
-    await executor.stop()
-    await brain.stop()
-    await analysis.stop()
+    reactor_task.cancel()
+    await reactor.stop()
     await collector.stop()
     overlay.stop()
     logger.info("Done.")
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Brainiest Mind")
+    p = argparse.ArgumentParser(description="Jarvis — Proactive AI Assistant")
     p.add_argument("--no-camera", dest="camera", action="store_false", default=True)
     p.add_argument("--no-desktop", dest="desktop", action="store_false", default=True)
     p.add_argument("--no-audio", dest="audio", action="store_false", default=True)
     p.add_argument("--no-browser", dest="browser", action="store_false", default=True)
-    p.add_argument("--camera-interval", type=float, default=5.0,
-                   help="Seconds between camera captures (default: 5)")
-    p.add_argument("--desktop-interval", type=float, default=10.0,
-                   help="Seconds between desktop screenshots (default: 10)")
-    p.add_argument("--browser-interval", type=float, default=10.0,
-                   help="Seconds between browser history polls (default: 10)")
-    p.add_argument("--analysis-interval", type=float, default=30.0,
-                   help="Seconds between LLM analysis rounds (default: 30)")
-    p.add_argument("--brain-interval", type=float, default=35.0,
-                   help="Seconds between Brain reasoning rounds (default: 35)")
-    p.add_argument("--print-interval", type=float, default=5.0,
-                   help="Seconds between event summary prints (default: 5)")
+    p.add_argument("--camera-interval", type=float, default=3.0,
+                   help="Seconds between camera captures (default: 3)")
+    p.add_argument("--desktop-interval", type=float, default=5.0,
+                   help="Seconds between desktop screenshots (default: 5)")
+    p.add_argument("--browser-interval", type=float, default=5.0,
+                   help="Seconds between browser history polls (default: 5)")
+    p.add_argument("--periodic", type=float, default=10.0,
+                   help="Seconds between periodic background reactions (default: 10)")
     p.add_argument("--language", default="zh")
     return p.parse_args()
 
