@@ -13,6 +13,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -24,11 +25,14 @@ class NativeOverlay:
     """
     Controls the native macOS overlay from the async executor.
     Spawns overlay_window.py as a separate subprocess.
+    Reads feedback from stdout (user button clicks, auto-expire).
     """
 
     def __init__(self):
         self._proc: subprocess.Popen | None = None
         self._script = Path(__file__).parent / "overlay_window.py"
+        self._feedback_buffer: list[dict] = []
+        self._feedback_lock = threading.Lock()
 
     def start(self):
         """Start the overlay window process."""
@@ -38,15 +42,45 @@ class NativeOverlay:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        logger.info("Native overlay process started")
+        # Start stdout reader for feedback
+        self._stdout_thread = threading.Thread(
+            target=self._read_stdout, daemon=True
+        )
+        self._stdout_thread.start()
+        logger.info("Native overlay process started (with feedback reader)")
+
+    def _read_stdout(self):
+        """Read feedback JSON from overlay process stdout."""
+        while self._proc and self._proc.poll() is None:
+            try:
+                line = self._proc.stdout.readline()
+                if not line:
+                    break
+                line = line.decode("utf-8").strip()
+                if line:
+                    try:
+                        feedback = json.loads(line)
+                        with self._feedback_lock:
+                            self._feedback_buffer.append(feedback)
+                        logger.debug(f"Overlay feedback: {feedback}")
+                    except json.JSONDecodeError:
+                        pass
+            except Exception:
+                break
+
+    def get_feedback(self) -> list[dict]:
+        """Get and clear pending feedback events from overlay."""
+        with self._feedback_lock:
+            feedback = list(self._feedback_buffer)
+            self._feedback_buffer.clear()
+        return feedback
 
     def show_card(
         self,
         title: str,
         body: str,
         card_type: str = "result",
-        action: str = "",
-        confidence: float = 0,
+        card_id: str = "",
         timeout: int = 30,
     ):
         """Show a floating card next to the active window."""
@@ -55,10 +89,17 @@ class NativeOverlay:
             "type": card_type,
             "title": title,
             "body": body,
-            "action_label": action,
-            "confidence": confidence,
+            "card_id": card_id,
             "timeout": timeout,
         })
+
+    def push_thinking(self, entries: list[dict]):
+        """Push entries to the thinking log panel.
+
+        Each entry: {"text": "...", "type": "input|reason|decision|action|feedback|separator"}
+        """
+        if entries:
+            self._send({"action": "thinking", "entries": entries})
 
     def close_all(self):
         self._send({"action": "close_all"})

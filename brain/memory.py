@@ -124,13 +124,20 @@ class MemoryStore:
         if feedback:
             lines = []
             for f in feedback:
-                lines.append(f"- {f.get('summary', json.dumps(f, ensure_ascii=False))}")
+                ftype = f.get("type", "?")
+                if ftype == "meta":
+                    lines.append(f"- [语音] {f.get('content', '')}")
+                else:
+                    action = f.get("card_action", f.get("action", "?"))
+                    lines.append(f"- [{ftype}] {action}")
             parts.append("[用户反馈]\n" + "\n".join(lines))
 
         prefs = self.get_preferences()
         if prefs:
-            lines = [f"- {k}: {v}" for k, v in prefs.items()]
-            parts.append("[用户偏好]\n" + "\n".join(lines))
+            rules = prefs.get("rules", [])
+            if rules:
+                lines = [f"- {r}" for r in rules]
+                parts.append("[用户偏好]\n" + "\n".join(lines))
 
         return "\n\n".join(parts)
 

@@ -1,26 +1,21 @@
-# Brainiest Mind - Input Layer Dependencies
+# Jarvis — Proactive AI Assistant
 
-# Camera / Video capture
+# LLM (AWS Bedrock)
+anthropic>=0.40.0
+
+# Camera capture
 opencv-python>=4.9.0
 
-# Audio capture
+# Audio capture & processing
 sounddevice>=0.4.6
 numpy>=1.26.0
 
-# Speech-to-text (local, fast)
-faster-whisper>=1.0.0
+# Xunfei (iFlytek) real-time ASR
+websocket-client>=1.6.0
 
-# Chrome history (uses built-in sqlite3)
-# no extra dep needed
+# macOS native overlay (NSPanel + WKWebView)
+pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-WebKit>=10.0
 
-# Async utilities
-aiofiles>=23.2.0
-
-# LLM calls (for Analysis module)
-anthropic>=0.40.0
-
-# macOS notifications
-# uses built-in osascript, no dep needed
-
-# Data validation
-pydantic>=2.5.0
+# Async HTTP
+aiohttp>=3.9.0

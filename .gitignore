@@ -21,3 +21,4 @@ memory/preferences.json
 
 # OS
 .DS_Store
+.gstack/
