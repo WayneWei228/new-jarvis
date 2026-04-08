@@ -1,11 +1,11 @@
 """
-Executor — 执行 Brain 的决策，并通过 UI 实时展示给用户。
+Executor — 执行 Brain 的决策，通过原生浮动窗口实时展示给用户。
 
 Flow:
 1. Watch brain/decisions/ for new decision files
-2. Push "brain decided" event to UI
+2. Show "thinking" card on native overlay
 3. Call LLM to actually execute the plan
-4. Push result to UI (overlay + macOS notification)
+4. Show result card (summary, translation, suggestion, etc.)
 5. Save result to memory + results/
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from anthropic import AnthropicBedrock
 
 from brain.memory import MemoryStore
-from executor.notifier import Notifier
+from executor.overlay import NativeOverlay
 
 logger = logging.getLogger(__name__)
 
@@ -38,26 +38,26 @@ EXECUTOR_SYSTEM_PROMPT = """\
    - 如果决策是"给出代码建议"，直接写出代码
    - 如果决策是"准备资源"，直接列出资源和关键信息
 
-2. **简洁有力** — 用户在忙，内容要精炼、可操作
+2. **简洁有力** — 用户在忙，内容要精炼、可操作，控制在300字以内
 
 3. **中文输出** — 除非涉及代码或英文术语
 
-4. **格式清晰** — 使用 markdown 格式，标题、列表、代码块
+4. **格式清晰** — 用换行和符号分隔，便于快速扫读
 """
 
 
 class Executor:
-    """Watches for Brain decisions and executes them."""
+    """Watches for Brain decisions, executes them, shows results via native overlay."""
 
     def __init__(
         self,
-        notifier: Notifier,
+        overlay: NativeOverlay,
         decision_dir: str = "brain/decisions",
         result_dir: str = "executor/results",
         memory_dir: str = "memory",
         interval_sec: float = 5.0,
     ):
-        self.notifier = notifier
+        self.overlay = overlay
         self.decision_dir = Path(decision_dir)
         self.result_dir = Path(result_dir)
         self.interval_sec = interval_sec
@@ -116,30 +116,21 @@ class Executor:
         priority = decision.get("priority", "medium")
         confidence = decision.get("confidence", 0)
 
-        # 1. Notify UI: Brain decided
-        await self.notifier.push_event("brain_decision", {
-            "action": action,
-            "reason": reason,
-            "priority": priority,
-            "confidence": confidence,
-        })
-
-        await asyncio.sleep(1.5)  # Brief pause so user can see the decision
-
-        # 2. Skip low-confidence or no_action decisions
-        if confidence < 0.5 or action == "no_action":
-            await self.notifier.push_event("status_update", {
-                "summary": f"Observing... ({action})",
-            })
+        # Skip low-confidence or no_action
+        if confidence < 0.5 or "no_action" in action.lower():
+            logger.info(f"Skipping: {action} (confidence={confidence})")
             return
 
-        # 3. Notify UI: Executing
-        await self.notifier.push_event("executing", {
-            "action": action,
-            "plan": plan,
-        })
+        # 1. Show "thinking" card
+        self.overlay.show_card(
+            title=action[:60],
+            body=reason,
+            card_type="thinking",
+            action="thinking...",
+            timeout=15,
+        )
 
-        # 4. Call LLM to produce actual content
+        # 2. Call LLM to produce actual content
         logger.info(f"Executing: {action}")
         try:
             loop = asyncio.get_event_loop()
@@ -148,20 +139,26 @@ class Executor:
             )
         except Exception as e:
             logger.error(f"Execution LLM call failed: {e}")
-            await self.notifier.push_event("execution_error", {
-                "message": str(e),
-            })
+            self.overlay.show_card(
+                title="Error",
+                body=str(e)[:200],
+                card_type="warning",
+                timeout=10,
+            )
             return
 
-        # 5. Notify UI: Result
-        await self.notifier.push_event("execution_complete", {
-            "action": action,
-            "result": result,
-            "title": f"AI: {action[:50]}",
-            "message": result[:100],
-        })
+        # 3. Close thinking card, show result
+        self.overlay.close_all()
+        self.overlay.show_card(
+            title=action[:60],
+            body=result,
+            card_type="result",
+            action=priority,
+            confidence=confidence,
+            timeout=60,  # Results stay longer
+        )
 
-        # 6. Save result
+        # 4. Save result
         self._save_result(decision, result, filename)
         logger.info(f"Executed: {action} ({len(result)} chars)")
 
@@ -205,14 +202,12 @@ class Executor:
             "timestamp": time.time(),
         }
 
-        # Save to results dir
         filepath = self.result_dir / f"result_{ts}.json"
         filepath.write_text(
             json.dumps(result_data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-        # Save to memory
         self.memory.save_result(result_data)
 
     async def stop(self) -> None:

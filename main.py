@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from input import InputCollector
 from analysis import LLMAnalysis
 from brain import Brain
-from executor import Executor, Notifier, WebUI
+from executor import Executor, NativeOverlay
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,8 +100,9 @@ async def main(args):
     logger.info(f"  Brain:    every {args.brain_interval}s")
     logger.info("=" * 50)
 
-    # 1. Notifier (shared event bus for UI)
-    notifier = Notifier()
+    # 1. Native Overlay (floating window)
+    overlay = NativeOverlay()
+    overlay.start()
 
     # 2. Input Collector
     collector = InputCollector(
@@ -120,18 +121,15 @@ async def main(args):
         collector=collector,
         interval_sec=args.analysis_interval,
         max_frames=2,
-        notifier=notifier,
     )
 
     # 4. Brain — continuous reasoning
     brain = Brain(
         interval_sec=args.brain_interval,
-        notifier=notifier,
     )
 
-    # 5. Executor + Web UI
-    web_ui = WebUI(notifier, port=7888)
-    executor = Executor(notifier=notifier)
+    # 5. Executor (watches decisions → executes → shows overlay)
+    executor = Executor(overlay=overlay)
 
     # Handle Ctrl+C
     stop_event = asyncio.Event()
@@ -145,7 +143,6 @@ async def main(args):
         loop.add_signal_handler(sig, handle_signal)
 
     # Start everything
-    await web_ui.start()
     await collector.start()
     tasks = [
         asyncio.create_task(print_events_loop(collector, interval=args.print_interval)),
@@ -164,7 +161,7 @@ async def main(args):
     await brain.stop()
     await analysis.stop()
     await collector.stop()
-    await web_ui.stop()
+    overlay.stop()
     logger.info("Done.")
 
 

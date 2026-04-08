@@ -79,7 +79,6 @@ class Brain:
         decision_dir: str = "brain/decisions",
         memory_dir: str = "memory",
         interval_sec: float = 35.0,
-        notifier=None,
     ):
         self.status_dir = Path(status_dir)
         self.decision_dir = Path(decision_dir)
@@ -87,7 +86,6 @@ class Brain:
         self._running = False
         self._round = 0
         self._last_status_file: str | None = None
-        self._notifier = notifier
 
         # Memory store
         self.memory = MemoryStore(memory_dir=memory_dir)
@@ -127,11 +125,6 @@ class Brain:
 
         # 4. Call LLM
         logger.info(f"Brain round {self._round}: thinking...")
-        if self._notifier:
-            await self._notifier.push_event("brain_thinking", {
-                "action": "Analyzing your current state...",
-                "reason": f"Round {self._round}",
-            })
         try:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, self._call_llm, prompt)

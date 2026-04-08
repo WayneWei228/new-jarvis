@@ -58,7 +58,6 @@ class LLMAnalysis:
         interval_sec: float = 30.0,
         output_dir: str = "input/user_status",
         max_frames: int = 2,
-        notifier=None,
     ):
         self.collector = collector
         self.interval_sec = interval_sec
@@ -66,7 +65,6 @@ class LLMAnalysis:
         self.max_frames = max_frames
         self._running = False
         self._round = 0
-        self._notifier = notifier
 
         # AWS Bedrock with API Key
         self._token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
@@ -117,11 +115,6 @@ class LLMAnalysis:
         logger.info(f"Round {self._round}: saved → {output_path.name}")
         preview = response[:200].replace("\n", " ")
         logger.info(f"  {preview}...")
-
-        if self._notifier:
-            asyncio.ensure_future(self._notifier.push_event("status_update", {
-                "summary": preview,
-            }))
 
     def _build_content(self, snapshot: dict) -> list[dict]:
         """Build Claude API message content from snapshot."""
