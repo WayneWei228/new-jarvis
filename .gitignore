@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Personal data - camera frames, screenshots, status reports
+input/user_status/frames/
+input/user_status/screenshots/
+input/user_status/*.md
+
+# Brain decisions & executor results (contain personal context)
+brain/decisions/*.json
+executor/results/*.json
+
+# Memory store (contains personal data)
+memory/*.jsonl
+memory/preferences.json
+
+# Env
+.env
+
+# OS
+.DS_Store

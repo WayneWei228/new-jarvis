@@ -1,0 +1,26 @@
+# Brainiest Mind - Input Layer Dependencies
+
+# Camera / Video capture
+opencv-python>=4.9.0
+
+# Audio capture
+sounddevice>=0.4.6
+numpy>=1.26.0
+
+# Speech-to-text (local, fast)
+faster-whisper>=1.0.0
+
+# Chrome history (uses built-in sqlite3)
+# no extra dep needed
+
+# Async utilities
+aiofiles>=23.2.0
+
+# LLM calls (for Analysis module)
+anthropic>=0.40.0
+
+# macOS notifications
+# uses built-in osascript, no dep needed
+
+# Data validation
+pydantic>=2.5.0
