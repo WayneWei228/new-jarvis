@@ -87,6 +87,7 @@ class InputCollector:
         desktop_interval: float = 10.0,
         browser_poll_interval: float = 10.0,
         audio_language: str = "zh",
+        audio_energy_threshold: float = 0.02,
         max_events: int = 5000,
         enable_camera: bool = True,
         enable_desktop: bool = True,
@@ -101,7 +102,7 @@ class InputCollector:
         # Input sources
         self._camera = ScreenCapture(interval_sec=camera_interval) if enable_camera else None
         self._desktop = DesktopCapture(interval_sec=desktop_interval) if enable_desktop else None
-        self._audio = AudioInput(language=audio_language) if enable_audio else None
+        self._audio = AudioInput(language=audio_language, energy_threshold=audio_energy_threshold) if enable_audio else None
         self._browser = BrowserMonitor(poll_interval=browser_poll_interval) if enable_browser else None
         self._feedback = FeedbackReceiver()
 

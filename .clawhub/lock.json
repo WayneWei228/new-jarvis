@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "skills": {
+    "deep-research-pro": {
+      "version": "1.0.2",
+      "installedAt": 1775703843633
+    },
+    "desearch-web-search": {
+      "version": "1.0.1",
+      "installedAt": 1775703844059
+    },
+    "daily-news": {
+      "version": "1.0.0",
+      "installedAt": 1775703900853
+    },
+    "send-email": {
+      "version": "1.0.1",
+      "installedAt": 1775703900866
+    },
+    "macos-calendar": {
+      "version": "1.2.0",
+      "installedAt": 1775703900969
+    },
+    "mac-control": {
+      "version": "1.0.0",
+      "installedAt": 1775703909005
+    },
+    "universal-translate": {
+      "version": "1.0.0",
+      "installedAt": 1775703960043
+    },
+    "summarize-pro": {
+      "version": "1.0.0",
+      "installedAt": 1775703962302
+    }
+  }
+}

@@ -156,11 +156,20 @@ class IflytekStreamingASR:
 
         RTASR 大模型直接接收二进制 PCM 数据。
         queue.get() 以录音实时速率自然阻塞，无需额外 sleep。
+        当队列为空时发送静音帧保持连接。
         """
+        # 640 samples * 2 bytes = 1280 bytes silence frame
+        silence_pcm = b"\x00" * 1280
+
         while ws.sock and ws.sock.connected:
             try:
                 chunk: np.ndarray = audio_queue.get(timeout=1.0)
             except queue.Empty:
+                # Send silence to keep WebSocket alive
+                try:
+                    ws.send(silence_pcm, opcode=websocket.ABNF.OPCODE_BINARY)
+                except Exception:
+                    return
                 continue
 
             pcm = (

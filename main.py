@@ -1,18 +1,13 @@
 """
 Jarvis — Proactive AI Assistant
 
-Event-driven architecture:
-  INPUT (camera + desktop + audio + browser)
-    → Reactor (single LLM call: perceive + think + act)
-      → Native Overlay (floating macOS panel)
-
-Two response modes:
-  - IMMEDIATE: user speaks → react in 3-5s
-  - PERIODIC: background observation every 10s
+Two modes:
+  --streaming  : OpenAI Realtime API (gpt-4o) — 持续感知，原生音频理解
+  (default)    : Haiku 3s tick — 截屏+ASR 快照式观察
 
 Usage:
-    source .venv/bin/activate
-    python main.py
+    python main.py                # Haiku tick mode
+    python main.py --streaming    # Realtime streaming mode
     python main.py --no-camera
 """
 
@@ -40,7 +35,6 @@ if _ENV_PATH.exists():
 sys.path.insert(0, str(Path(__file__).parent))
 
 from input import InputCollector
-from reactor import Reactor
 from executor import NativeOverlay
 
 logging.basicConfig(
@@ -52,15 +46,21 @@ logger = logging.getLogger("main")
 
 
 async def main(args):
+    mode = "STREAMING" if args.streaming else "TICK"
+
     logger.info("=" * 50)
     logger.info("  Jarvis — Proactive AI Assistant")
-    logger.info("  INPUT → Reactor → Overlay")
+    logger.info(f"  Mode: {mode}")
     logger.info("=" * 50)
-    logger.info(f"  Camera:   {'ON' if args.camera else 'OFF'}")
-    logger.info(f"  Desktop:  {'ON' if args.desktop else 'OFF'}")
-    logger.info(f"  Audio:    {'ON' if args.audio else 'OFF'}")
-    logger.info(f"  Browser:  {'ON' if args.browser else 'OFF'}")
-    logger.info(f"  Periodic: every {args.periodic}s")
+    logger.info(f"  Camera:  {'ON' if args.camera else 'OFF'}")
+    logger.info(f"  Desktop: {'ON' if args.desktop else 'OFF'}")
+    if args.streaming:
+        logger.info(f"  Audio:   STREAMING (native, 24kHz)")
+        logger.info(f"  Vision:  every {args.vision_interval}s")
+    else:
+        logger.info(f"  Audio:   {'ON' if args.audio else 'OFF'} (ASR)")
+        logger.info(f"  Tick:    every {args.periodic}s")
+    logger.info(f"  Browser: {'ON' if args.browser else 'OFF'}")
     logger.info("=" * 50)
 
     # 1. Native Overlay
@@ -68,23 +68,34 @@ async def main(args):
     overlay.start()
 
     # 2. Input Collector
+    # In streaming mode, disable audio (StreamingReactor handles audio directly)
     collector = InputCollector(
         enable_camera=args.camera,
         enable_desktop=args.desktop,
-        enable_audio=args.audio,
+        enable_audio=False if args.streaming else args.audio,
         enable_browser=args.browser,
         camera_interval=args.camera_interval,
         desktop_interval=args.desktop_interval,
         browser_poll_interval=args.browser_interval,
         audio_language=args.language,
+        audio_energy_threshold=args.energy_threshold,
     )
 
-    # 3. Reactor (replaces Analysis + Brain + Executor)
-    reactor = Reactor(
-        collector=collector,
-        overlay=overlay,
-        periodic_interval=args.periodic,
-    )
+    # 3. Reactor
+    if args.streaming:
+        from streaming_reactor import StreamingReactor
+        reactor = StreamingReactor(
+            collector=collector,
+            overlay=overlay,
+            vision_interval=args.vision_interval,
+        )
+    else:
+        from reactor import Reactor
+        reactor = Reactor(
+            collector=collector,
+            overlay=overlay,
+            tick_interval=args.periodic,
+        )
 
     # Handle Ctrl+C
     stop_event = asyncio.Event()
@@ -114,19 +125,34 @@ async def main(args):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Jarvis — Proactive AI Assistant")
+
+    # Mode
+    p.add_argument("--streaming", action="store_true", default=False,
+                   help="Use OpenAI Realtime API for continuous streaming perception")
+
+    # Input toggles
     p.add_argument("--no-camera", dest="camera", action="store_false", default=True)
     p.add_argument("--no-desktop", dest="desktop", action="store_false", default=True)
     p.add_argument("--no-audio", dest="audio", action="store_false", default=True)
     p.add_argument("--no-browser", dest="browser", action="store_false", default=True)
+
+    # Intervals
     p.add_argument("--camera-interval", type=float, default=3.0,
-                   help="Seconds between camera captures (default: 3)")
+                   help="Camera capture interval (default: 3s)")
     p.add_argument("--desktop-interval", type=float, default=5.0,
-                   help="Seconds between desktop screenshots (default: 5)")
+                   help="Desktop screenshot interval (default: 5s)")
     p.add_argument("--browser-interval", type=float, default=5.0,
-                   help="Seconds between browser history polls (default: 5)")
-    p.add_argument("--periodic", type=float, default=10.0,
-                   help="Seconds between periodic background reactions (default: 10)")
+                   help="Browser history poll interval (default: 5s)")
+    p.add_argument("--periodic", type=float, default=3.0,
+                   help="Tick interval for Haiku mode (default: 3s)")
+    p.add_argument("--vision-interval", type=float, default=5.0,
+                   help="Vision update interval for streaming mode (default: 5s)")
+
+    # Audio
     p.add_argument("--language", default="zh")
+    p.add_argument("--energy-threshold", type=float, default=0.02,
+                   help="Mic energy gate for Haiku mode (default: 0.02)")
+
     return p.parse_args()
 
 

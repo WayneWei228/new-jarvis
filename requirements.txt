@@ -1,7 +1,11 @@
 # Jarvis — Proactive AI Assistant
 
-# LLM (AWS Bedrock)
+# LLM
 anthropic>=0.40.0
+google-genai>=1.0.0
+
+# Image compression for Haiku vision
+Pillow>=10.0.0
 
 # Camera capture
 opencv-python>=4.9.0
@@ -16,6 +20,9 @@ websocket-client>=1.6.0
 # macOS native overlay (NSPanel + WKWebView)
 pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-WebKit>=10.0
+
+# OpenAI Realtime API (streaming mode)
+websockets>=13.0
 
 # Async HTTP
 aiohttp>=3.9.0

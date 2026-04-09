@@ -37,8 +37,9 @@ if _PROJECT_ROOT not in sys.path:
 class AudioInput:
     """Captures microphone audio and transcribes via 讯飞 in real-time."""
 
-    def __init__(self, language: str = "zh"):
+    def __init__(self, language: str = "zh", energy_threshold: float = 0.02):
         self.language = language
+        self.energy_threshold = energy_threshold
         self._running = False
         self._recorder = None
         self._asr = None
@@ -68,7 +69,10 @@ class AudioInput:
         loop = asyncio.get_event_loop()
 
         # Set up recorder
-        self._recorder = AudioRecorder(sample_rate=16000, channels=1, blocksize=640)
+        self._recorder = AudioRecorder(
+            sample_rate=16000, channels=1, blocksize=640,
+            energy_threshold=self.energy_threshold,
+        )
 
         # Set up ASR client
         self._asr = IflytekStreamingASR(app_id, api_key, api_secret)
