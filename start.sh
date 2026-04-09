@@ -22,9 +22,9 @@ NC='\033[0m'
 cleanup() {
   echo ""
   echo -e "${YELLOW}[start.sh] Shutting down...${NC}"
-  # kill 后端和前端
-  kill $JARVIS_PID $VITE_PID 2>/dev/null || true
-  wait $JARVIS_PID $VITE_PID 2>/dev/null || true
+  # kill 后端、前端、和 insta360 流服务
+  kill $JARVIS_PID $VITE_PID $INSTA360_PID 2>/dev/null || true
+  wait $JARVIS_PID $VITE_PID $INSTA360_PID 2>/dev/null || true
   echo -e "${GREEN}[start.sh] All stopped.${NC}"
   exit 0
 }
@@ -65,6 +65,21 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
+# ── 3.5 启动 Insta360 独立视频流服务 ──
+echo -e "${GREEN}[start.sh] Starting Insta360 stream server (port 9100)...${NC}"
+"$VENV/bin/python3" "$DIR/insta360_stream.py" &
+INSTA360_PID=$!
+
+# 等 Insta360 流启动（端口 9100）
+echo -e "${CYAN}[start.sh] Waiting for Insta360 stream (port 9100)...${NC}"
+for i in $(seq 1 10); do
+  if lsof -i :9100 >/dev/null 2>&1; then
+    echo -e "${GREEN}[start.sh] Insta360 stream ready!${NC}"
+    break
+  fi
+  sleep 1
+done
+
 # ── 4. 启动 Web 前端 ──
 echo -e "${GREEN}[start.sh] Starting Web frontend...${NC}"
 (cd "$WEB" && npx vite --host) &
@@ -79,12 +94,16 @@ echo -e "${GREEN}  🎥 Jarvis + Web 已启动${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  Web UI: http://localhost:5173${NC}"
 echo -e "${GREEN}  AI Thinking: ws://localhost:8765/ws${NC}"
+echo -e "${GREEN}  Insta360 Stream: http://localhost:9100/stream${NC}"
 echo ""
 echo -e "${CYAN}📹 摄像头配置：${NC}"
-echo -e "${CYAN}  • Jarvis AI 分析: 本地电脑摄像头 (索引 0)${NC}"
-echo -e "${CYAN}  • Web UI 显示:    Insta360 摄像头 (索引 1)${NC}"
+echo -e "${CYAN}  • Jarvis AI 分析:    Mac 内置摄像头 (索引 1)${NC}"
+echo -e "${CYAN}  • Web UI 左下角显示: Insta360 X4 (索引 0)${NC}"
 echo ""
-echo -e "${CYAN}✅ Web 左下角摄像头框会自动显示 Insta360 实时视频${NC}"
+echo -e "${CYAN}✅ 三个独立服务：${NC}"
+echo -e "${CYAN}  1. Jarvis 后端 → 处理 AI 分析（Mac 摄像头）${NC}"
+echo -e "${CYAN}  2. Insta360 流服务 → 推送 Insta360 实时视频${NC}"
+echo -e "${CYAN}  3. Web 前端 → 展示思维链 + Insta360 视频${NC}"
 echo ""
 echo -e "${GREEN}  按 Ctrl+C 停止所有服务${NC}"
 echo -e "${GREEN}══════════════════════════════════════════════${NC}"

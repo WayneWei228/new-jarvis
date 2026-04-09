@@ -943,109 +943,18 @@ async function initFaceModels() {
 }
 
 const VideoDitheringComponent = ({ label }: { label: string }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [hasFrame, setHasFrame] = useState(false)
-  const [status, setStatus] = useState('Waiting for Jarvis Insta360 camera...')
-  const [error, setError] = useState('')
-
-  // 接收 Jarvis 推送的 Insta360 摄像头帧
-  useEffect(() => {
-    let isMounted = true
-
-    const handleCameraFrame = (e: Event) => {
-      if (!isMounted) return
-
-      const event = e as CustomEvent
-      const imageBase64 = event.detail?.image
-
-      if (!imageBase64) {
-        console.warn('No image data in camera frame event')
-        return
-      }
-
-      const canvas = canvasRef.current
-      if (!canvas) {
-        console.warn('Canvas ref not available')
-        return
-      }
-
-      const img = new Image()
-      img.onload = () => {
-        if (!isMounted) return
-
-        const ctx = canvas.getContext('2d')
-        if (!ctx) return
-
-        canvas.width = img.width
-        canvas.height = img.height
-        ctx.drawImage(img, 0, 0)
-
-        setHasFrame(true)
-        setError('')
-        setStatus('')
-        console.log('✅ Insta360 frame displayed:', img.width, 'x', img.height)
-      }
-
-      img.onerror = () => {
-        console.error('❌ Failed to load camera frame image')
-        setError('Failed to load frame')
-      }
-
-      img.src = `data:image/jpeg;base64,${imageBase64}`
-    }
-
-    // 监听 Jarvis 推送的摄像头帧事件
-    window.addEventListener('jarvis-camera-frame', handleCameraFrame)
-    console.log('🎧 Listening for Jarvis Insta360 camera frames...')
-
-    return () => {
-      isMounted = false
-      window.removeEventListener('jarvis-camera-frame', handleCameraFrame)
-    }
-  }, [])
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (canvasRef.current) {
-        const ctx = canvasRef.current.getContext('2d')
-        if (ctx) {
-          ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
-        }
-      }
-    }
-  }, [])
-
   return (
-    <div className={`w-full h-full relative bg-black rounded-[10px] overflow-hidden border border-solid border-white`}>
-      <canvas
-        ref={canvasRef}
-        className="block w-full h-full"
-        style={{ borderRadius: '10px', objectFit: 'cover', display: hasFrame ? 'block' : 'none' }}
+    <div className="w-full h-full relative bg-black rounded-[10px] overflow-hidden border border-solid border-white">
+      <img
+        src="http://localhost:9100/stream"
+        className="block w-full h-full object-cover"
+        style={{ borderRadius: '10px' }}
+        alt="Insta360 stream"
       />
-      {!hasFrame && (
-        <div className="w-full h-full flex items-center justify-center bg-gray-900 text-gray-400">
-          <div className="text-center">
-            <div className="text-2xl mb-2">📷</div>
-            <p className="text-xs">{status}</p>
-            {error && <p className="text-[10px] mt-2 text-red-400">{error}</p>}
-          </div>
-        </div>
-      )}
 
       <div className="absolute top-1.5 right-1.5 flex items-center gap-1.5">
-        <div
-          className={`w-2 h-2 rounded-full ${
-            hasFrame ? 'bg-green-500 animate-pulse' : 'bg-gray-500'
-          }`}
-        />
-        <span
-          className={`text-[10px] font-mono tracking-wider ${
-            hasFrame ? 'text-green-400' : 'text-gray-500'
-          }`}
-        >
-          {hasFrame ? 'INSTA360' : 'OFFLINE'}
-        </span>
+        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+        <span className="text-[10px] font-mono tracking-wider text-green-400">INSTA360</span>
       </div>
 
       <div className="absolute bottom-1.5 left-1.5 text-green-500/60 text-[9px] font-mono">
@@ -1564,8 +1473,8 @@ function App() {
         `
       }}
     >
-      {/* <PixelBackgroundComponent /> */}
-      {/* <LightSpotsComponent /> */}
+      <PixelBackgroundComponent />
+      <LightSpotsComponent />
 
       {FRAMES.map((frame) => (
         <div

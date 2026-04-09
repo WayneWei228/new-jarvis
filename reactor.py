@@ -235,25 +235,26 @@ class Reactor:
         self._conversation_history: list[dict] = []  # {time, role, text}
         self._history_max = 30  # keep last 30 entries
 
-        # Insta360 摄像头连接（索引 1）用于推送到前端
-        self._insta360_cap = None
+        # Mac 内置摄像头连接（索引 1）用于 AI 分析并推送到前端
+        # 注意：索引 0 = Insta360 X4，索引 1 = Mac 内置 FaceTime 摄像头
+        self._builtin_cam = None
         if cv2:
             try:
-                self._insta360_cap = cv2.VideoCapture(1)  # Insta360 是索引 1
-                if self._insta360_cap.isOpened():
+                self._builtin_cam = cv2.VideoCapture(1)  # Mac 内置摄像头是索引 1
+                if self._builtin_cam.isOpened():
                     # Try to read first frame to verify it works
-                    ret, _ = self._insta360_cap.read()
+                    ret, _ = self._builtin_cam.read()
                     if ret:
-                        logger.info("✅ Insta360 camera (index 1) initialized and working")
+                        logger.info("✅ Mac built-in camera (index 1) initialized and working")
                     else:
-                        logger.warning("⚠️ Insta360 camera (index 1) opened but cannot read frames")
-                        self._insta360_cap = None
+                        logger.warning("⚠️ Mac built-in camera (index 1) opened but cannot read frames")
+                        self._builtin_cam = None
                 else:
-                    logger.warning("⚠️ Insta360 camera (index 1) not available")
-                    self._insta360_cap = None
+                    logger.warning("⚠️ Mac built-in camera (index 1) not available")
+                    self._builtin_cam = None
             except Exception as e:
-                logger.error(f"Failed to initialize Insta360 camera: {e}")
-                self._insta360_cap = None
+                logger.error(f"Failed to initialize Mac built-in camera: {e}")
+                self._builtin_cam = None
 
     @staticmethod
     def _load_profile(name: str) -> dict:
@@ -338,20 +339,17 @@ class Reactor:
         # Grab latest inputs
         snapshot = self.collector.get_snapshot(window_sec=5.0)
 
-        # Push Insta360 camera frame to web FIRST (every tick, regardless of events)
-        # 从索引 1（Insta360）读取帧并推送到前端（左下角摄像头框）
-        if self._insta360_cap and self._insta360_cap.isOpened():
-            ret, frame = self._insta360_cap.read()
+        # Push Mac built-in camera frame to web (every tick, regardless of events)
+        # 从索引 1（Mac 内置摄像头）读取帧并推送到前端
+        if self._builtin_cam and self._builtin_cam.isOpened():
+            ret, frame = self._builtin_cam.read()
             if ret:
-                # 编码为 JPEG
                 _, buffer = cv2.imencode('.jpg', frame)
                 jpeg_bytes = buffer.tobytes()
-                # 转换为 base64
                 b64_frame = base64.b64encode(jpeg_bytes).decode('utf-8')
-                # 推送到前端
                 self.overlay.push_camera_frame(b64_frame)
             else:
-                logger.warning("⚠️ Failed to read frame from Insta360 camera")
+                logger.warning("⚠️ Failed to read frame from Mac built-in camera")
         else:
             # Fallback: 推送 InputCollector 的本地摄像头帧
             frames = snapshot["physiological"].get("camera_frames", [])
