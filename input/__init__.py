@@ -100,7 +100,8 @@ class InputCollector:
         self._tasks: list[asyncio.Task] = []
 
         # Input sources
-        self._camera = ScreenCapture(interval_sec=camera_interval) if enable_camera else None
+        # Jarvis 使用本地电脑摄像头（索引 0）进行 AI 分析
+        self._camera = ScreenCapture(interval_sec=camera_interval, camera_index=0) if enable_camera else None
         self._desktop = DesktopCapture(interval_sec=desktop_interval) if enable_desktop else None
         self._audio = AudioInput(language=audio_language, energy_threshold=audio_energy_threshold) if enable_audio else None
         self._browser = BrowserMonitor(poll_interval=browser_poll_interval) if enable_browser else None

@@ -858,18 +858,21 @@ const LightSpotsComponent = () => {
     }
   }, [])
 
+  // Listen for AI state from Jarvis
   useEffect(() => {
-    const onFaceDetected = (e: Event) => {
-      const { hasFace } = (e as CustomEvent).detail
-      if (hasFace && !gatheringRef.current) {
+    const handleAiState = (e: Event) => {
+      const { state } = (e as CustomEvent).detail
+      if (state === 'execute') {
+        // AI executing (has popup) → gather light spots
         gatheringRef.current = true
-      } else if (!hasFace && gatheringRef.current) {
+      } else if (state === 'observe') {
+        // AI observing → scatter light spots
         gatheringRef.current = false
         gatherProgressRef.current = Math.max(gatherProgressRef.current, 0.01)
       }
     }
-    window.addEventListener('face-detected', onFaceDetected)
-    return () => window.removeEventListener('face-detected', onFaceDetected)
+    window.addEventListener('jarvis-ai-state', handleAiState)
+    return () => window.removeEventListener('jarvis-ai-state', handleAiState)
   }, [])
 
   return (
@@ -908,10 +911,6 @@ function speakHello() {
   window.speechSynthesis.speak(u)
 }
 
-function notifyFaceDetected(hasFace: boolean) {
-  window.dispatchEvent(new CustomEvent('face-detected', { detail: { hasFace } }))
-}
-
 function loadFaceApi(): Promise<void> {
   if (faceApiLoaded) return Promise.resolve()
   if (faceApiLoading) {
@@ -944,313 +943,181 @@ async function initFaceModels() {
 }
 
 const VideoDitheringComponent = ({ label }: { label: string }) => {
-  const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const overlayRef = useRef<HTMLCanvasElement>(null)
-  const [hasPermission, setHasPermission] = useState(false)
+  const [hasFrame, setHasFrame] = useState(false)
+  const [status, setStatus] = useState('Waiting for Jarvis Insta360 camera...')
   const [error, setError] = useState('')
-  const animRef = useRef<number>(0)
-  const faceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // 接收 Jarvis 推送的 Insta360 摄像头帧
   useEffect(() => {
-    let stream: MediaStream | null = null
+    let isMounted = true
 
-    const startCamera = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
-        })
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-          setHasPermission(true)
-          setError('')
-        }
-      } catch (err: any) {
-        console.error('Camera error:', err?.name, err?.message, err)
-        if (err?.name === 'NotAllowedError') {
-          setError('Camera permission denied. Please allow camera access.')
-        } else if (err?.name === 'NotFoundError') {
-          setError('No camera found on this device.')
-        } else if (err?.name === 'NotReadableError') {
-          setError('Camera is in use by another application.')
-        } else if (err?.name === 'OverconstrainedError') {
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({ video: true })
-            if (videoRef.current) {
-              videoRef.current.srcObject = stream
-              setHasPermission(true)
-              setError('')
-            }
-            return
-          } catch {
-            setError('Camera not available.')
-          }
-        } else {
-          setError(`Camera error: ${err?.message || 'Unknown'}`)
-        }
-        setHasPermission(false)
+    const handleCameraFrame = (e: Event) => {
+      if (!isMounted) return
+
+      const event = e as CustomEvent
+      const imageBase64 = event.detail?.image
+
+      if (!imageBase64) {
+        console.warn('No image data in camera frame event')
+        return
       }
+
+      const canvas = canvasRef.current
+      if (!canvas) {
+        console.warn('Canvas ref not available')
+        return
+      }
+
+      const img = new Image()
+      img.onload = () => {
+        if (!isMounted) return
+
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return
+
+        canvas.width = img.width
+        canvas.height = img.height
+        ctx.drawImage(img, 0, 0)
+
+        setHasFrame(true)
+        setError('')
+        setStatus('')
+        console.log('✅ Insta360 frame displayed:', img.width, 'x', img.height)
+      }
+
+      img.onerror = () => {
+        console.error('❌ Failed to load camera frame image')
+        setError('Failed to load frame')
+      }
+
+      img.src = `data:image/jpeg;base64,${imageBase64}`
     }
 
-    startCamera()
+    // 监听 Jarvis 推送的摄像头帧事件
+    window.addEventListener('jarvis-camera-frame', handleCameraFrame)
+    console.log('🎧 Listening for Jarvis Insta360 camera frames...')
 
     return () => {
-      if (stream) stream.getTracks().forEach(t => t.stop())
-      if (animRef.current) cancelAnimationFrame(animRef.current)
-      if (faceIntervalRef.current) clearInterval(faceIntervalRef.current)
+      isMounted = false
+      window.removeEventListener('jarvis-camera-frame', handleCameraFrame)
+    }
+  }, [])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (canvasRef.current) {
+        const ctx = canvasRef.current.getContext('2d')
+        if (ctx) {
+          ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
+        }
+      }
+    }
+  }, [])
+
+  return (
+    <div className={`w-full h-full relative bg-black rounded-[10px] overflow-hidden border border-solid border-white`}>
+      {hasFrame ? (
+        <canvas
+          ref={canvasRef}
+          className="block w-full h-full"
+          style={{ borderRadius: '10px', objectFit: 'cover' }}
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center bg-gray-900 text-gray-400">
+          <div className="text-center">
+            <div className="text-2xl mb-2">📷</div>
+            <p className="text-xs">{status}</p>
+            {error && <p className="text-[10px] mt-2 text-red-400">{error}</p>}
+          </div>
+        </div>
+      )}
+
+      <div className="absolute top-1.5 right-1.5 flex items-center gap-1.5">
+        <div
+          className={`w-2 h-2 rounded-full ${
+            hasFrame ? 'bg-green-500 animate-pulse' : 'bg-gray-500'
+          }`}
+        />
+        <span
+          className={`text-[10px] font-mono tracking-wider ${
+            hasFrame ? 'text-green-400' : 'text-gray-500'
+          }`}
+        >
+          {hasFrame ? 'INSTA360' : 'OFFLINE'}
+        </span>
+      </div>
+
+      <div className="absolute bottom-1.5 left-1.5 text-green-500/60 text-[9px] font-mono">
+        {label}
+      </div>
+    </div>
+  )
+}
+
+const ScreenMirrorComponent = () => {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [hasPermission, setHasPermission] = useState(false)
+  const [error, setError] = useState('')
+  const streamRef = useRef<MediaStream | null>(null)
+
+  const startScreenShare = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { cursor: 'always' },
+        audio: false,
+      })
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        streamRef.current = stream
+        setHasPermission(true)
+        setError('')
+      }
+    } catch (err: any) {
+      if (err?.name === 'NotAllowedError') {
+        setError('Click to select screen')
+      } else if (err?.name === 'NotFoundError') {
+        setError('No screens found')
+      } else {
+        setError(`Error: ${err?.message || 'Unknown'}`)
+      }
+      setHasPermission(false)
     }
   }, [])
 
   useEffect(() => {
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    if (!video || !canvas || !hasPermission) return
-
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const bayer4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => v / 16.0)
-
-    const process = () => {
-      if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        canvas.width = video.videoWidth || 640
-        canvas.height = video.videoHeight || 480
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-        const data = imageData.data
-
-        for (let y = 0; y < canvas.height; y++) {
-          for (let x = 0; x < canvas.width; x++) {
-            const idx = (y * canvas.width + x) * 4
-            const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]
-            const threshold = bayer4[(y % 4) * 4 + (x % 4)]
-            const val = lum > threshold * 255 ? 255 : 0
-            data[idx] = val
-            data[idx + 1] = val
-            data[idx + 2] = val
-            data[idx + 3] = 255
-          }
-        }
-
-        ctx.putImageData(imageData, 0, 0)
-
-        ctx.fillStyle = 'rgba(0, 255, 100, 0.03)'
-        ctx.fillRect(0, 0, canvas.width, canvas.height)
-
-        const scanlineY = (Date.now() / 20) % canvas.height
-        ctx.fillStyle = 'rgba(0, 255, 100, 0.08)'
-        ctx.fillRect(0, scanlineY, canvas.width, 2)
-      }
-      animRef.current = requestAnimationFrame(process)
-    }
-
-    process()
-    return () => { if (animRef.current) cancelAnimationFrame(animRef.current) }
-  }, [hasPermission])
-
-  useEffect(() => {
-    if (!hasPermission) return
-    const video = videoRef.current
-    if (!video) return
-
-    let cancelled = false
-
-    const startFace = async () => {
-      try {
-        await loadFaceApi()
-        await initFaceModels()
-      } catch {
-        return
-      }
-      if (cancelled) return
-
-      const faceapi = (window as any).faceapi
-      if (!faceapi) return
-
-      const detect = async () => {
-        if (cancelled || !video || video.readyState < video.HAVE_ENOUGH_DATA) return
-        const overlay = overlayRef.current
-        if (!overlay) return
-
-        const vw = video.videoWidth || 640
-        const vh = video.videoHeight || 480
-        overlay.width = vw
-        overlay.height = vh
-
-        const octx = overlay.getContext('2d')
-        if (!octx) return
-        octx.clearRect(0, 0, vw, vh)
-
-        try {
-          const detections = await faceapi
-            .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
-            .withFaceLandmarks(true)
-            .withFaceExpressions()
-
-          const now = Date.now()
-          if (detections.length > 0) {
-            lastFaceDetectedTime = now
-            if (!faceGreeted) {
-              faceGreeted = true
-              speakHello()
-              notifyFaceDetected(true)
-            }
-          } else {
-            if (faceGreeted && now - lastFaceDetectedTime > 3000) {
-              faceGreeted = false
-              notifyFaceDetected(false)
-            }
-          }
-
-          for (const det of detections) {
-            const box = det.detection.box
-
-            octx.strokeStyle = '#22c55e'
-            octx.lineWidth = 2
-            octx.setLineDash([4, 4])
-            octx.strokeRect(box.x, box.y, box.width, box.height)
-            octx.setLineDash([])
-
-            const corners = [
-              [box.x, box.y, 1, 1],
-              [box.x + box.width, box.y, -1, 1],
-              [box.x, box.y + box.height, 1, -1],
-              [box.x + box.width, box.y + box.height, -1, -1],
-            ]
-            const cLen = 12
-            octx.strokeStyle = '#4ade80'
-            octx.lineWidth = 2.5
-            octx.setLineDash([])
-            for (const [cx, cy, dx, dy] of corners) {
-              octx.beginPath()
-              octx.moveTo(cx, cy + dy * cLen)
-              octx.lineTo(cx, cy)
-              octx.lineTo(cx + dx * cLen, cy)
-              octx.stroke()
-            }
-
-            if (det.landmarks) {
-              const pts = det.landmarks.positions
-
-              const jawLine = Array.from({length: 17}, (_, i) => i)
-              const leftEyebrow = [17,18,19,20,21]
-              const rightEyebrow = [22,23,24,25,26]
-              const noseBridge = [27,28,29,30]
-              const noseBottom = [31,32,33,34,35]
-              const leftEye = [36,37,38,39,40,41,36]
-              const rightEye = [42,43,44,45,46,47,42]
-              const outerLip = [48,49,50,51,52,53,54,55,56,57,58,59,48]
-              const innerLip = [60,61,62,63,64,65,66,67,60]
-
-              const groups = [jawLine, leftEyebrow, rightEyebrow, noseBridge, noseBottom, leftEye, rightEye, outerLip, innerLip]
-
-              octx.strokeStyle = 'rgba(74, 222, 128, 0.5)'
-              octx.lineWidth = 1
-              for (const group of groups) {
-                octx.beginPath()
-                for (let gi = 0; gi < group.length; gi++) {
-                  const pt = pts[group[gi]]
-                  if (!pt) continue
-                  if (gi === 0) octx.moveTo(pt.x, pt.y)
-                  else octx.lineTo(pt.x, pt.y)
-                }
-                octx.stroke()
-              }
-
-              for (let pi = 0; pi < pts.length; pi++) {
-                const pt = pts[pi]
-                octx.beginPath()
-                octx.fillStyle = 'rgba(74, 222, 128, 0.85)'
-                octx.arc(pt.x, pt.y, 2.2, 0, Math.PI * 2)
-                octx.fill()
-                octx.beginPath()
-                octx.fillStyle = 'rgba(180, 255, 220, 0.9)'
-                octx.arc(pt.x, pt.y, 0.8, 0, Math.PI * 2)
-                octx.fill()
-              }
-            }
-
-            if (det.expressions) {
-              const sorted = Object.entries(det.expressions as Record<string, number>)
-                .sort((a, b) => b[1] - a[1])
-              const topExpr = sorted[0]
-
-              const exprLabels: Record<string, string> = {
-                neutral: '😐 NEUTRAL',
-                happy: '😊 HAPPY',
-                sad: '😢 SAD',
-                angry: '😠 ANGRY',
-                fearful: '😨 FEAR',
-                disgusted: '🤢 DISGUST',
-                surprised: '😲 SURPRISE',
-              }
-
-              const labelText = exprLabels[topExpr[0]] || topExpr[0].toUpperCase()
-              const confidence = Math.round(topExpr[1] * 100)
-
-              octx.font = '11px monospace'
-              const textW = octx.measureText(`${labelText} ${confidence}%`).width + 12
-              const tagH = 18
-              const tagX = box.x
-              const tagY = box.y - tagH - 4
-
-              octx.fillStyle = 'rgba(0, 0, 0, 0.7)'
-              octx.beginPath()
-              octx.roundRect(tagX, tagY, textW, tagH, 3)
-              octx.fill()
-
-              octx.fillStyle = '#4ade80'
-              octx.fillText(`${labelText} ${confidence}%`, tagX + 6, tagY + 13)
-
-              const barW = box.width
-              const barH = 3
-              const barX = box.x
-              const barY = box.y + box.height + 4
-
-              octx.fillStyle = 'rgba(0, 0, 0, 0.5)'
-              octx.fillRect(barX, barY, barW, barH)
-              octx.fillStyle = '#22c55e'
-              octx.fillRect(barX, barY, barW * topExpr[1], barH)
-            }
-          }
-        } catch {}
-      }
-
-      faceIntervalRef.current = setInterval(detect, 300)
-    }
-
-    startFace()
     return () => {
-      cancelled = true
-      if (faceIntervalRef.current) clearInterval(faceIntervalRef.current)
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop())
+        streamRef.current = null
+      }
     }
-  }, [hasPermission])
+  }, [])
 
   return (
-    <div className="w-full h-full relative bg-black rounded-[10px] overflow-hidden border border-solid border-white">
-      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
-      {hasPermission ? (
-        <div className="relative w-full h-full">
-          <canvas ref={canvasRef} className="block w-full h-full object-cover" style={{ border: '1px solid #ffffff', borderRadius: '10px' }} />
-          <canvas ref={overlayRef} className="absolute inset-0 w-full h-full pointer-events-none" style={{ borderRadius: '5px' }} />
-        </div>
-      ) : (
-        <div className="w-full h-full flex items-center justify-center bg-gray-900 text-gray-400">
-          <div className="text-center">
-            <div className="text-2xl mb-2">📹</div>
-            <p className="text-xs">{error || 'Loading camera...'}</p>
-            <p className="text-[10px] mt-1 text-green-500">DITHERING STUDIO</p>
+    <div className="w-full h-full relative bg-black rounded-[10px] overflow-hidden border border-solid border-white cursor-pointer" onClick={startScreenShare}>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        className="block w-full h-full object-contain bg-black"
+      />
+      {!hasPermission && (
+        <div className="w-full h-full flex items-center justify-center bg-gray-900 text-gray-400 absolute inset-0 hover:bg-gray-800 transition-colors">
+          <div className="text-center pointer-events-none">
+            <div className="text-2xl mb-2">🖥️</div>
+            <p className="text-xs">{error || 'Click to share screen'}</p>
+            <p className="text-[10px] mt-1 text-green-500">SCREEN MIRROR</p>
           </div>
         </div>
       )}
-      <div className="absolute top-1.5 right-1.5 flex items-center gap-1.5">
-        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-        <span className="text-green-400 text-[10px] font-mono tracking-wider">DITHERING</span>
-      </div>
-      <div className="absolute bottom-1.5 left-1.5 text-green-500/60 text-[9px] font-mono">
-        {label}
-      </div>
+      {hasPermission && (
+        <div className="absolute top-1.5 right-1.5 flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          <span className="text-green-400 text-[10px] font-mono tracking-wider">MIRRORING</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -1359,92 +1226,188 @@ const SoundWaveComponent = () => {
   )
 }
 
-const StreamingTextComponent = () => {
-  const [lines, setLines] = useState<{ text: string; key: number }[]>([])
-  const containerRef = useRef<HTMLDivElement>(null)
-  const keyRef = useRef(0)
+interface ThinkingEntry {
+  text: string
+  type: string
+  key: number
+  time: string
+}
 
-  const corpus = [
-    "In the realm of digital consciousness, patterns emerge from chaos like constellations in the night sky. Each thought becomes a pixel, each idea a waveform dancing across the neural canvas of silicon dreams.",
-    "The algorithm breathes, inhaling data streams of human experience and exhaling synthetic poetry. Machine learning evolves beyond mere prediction into something resembling intuition.",
-    "Code flows like water through circuits, transforming electricity into meaning. Binary dreams populate the silicon valleys where algorithms wander in search of optimization.",
-    "Virtual spaces expand into infinite dimensions, while physical reality blurs at the edges. The boundary between creator and creation dissolves in the digital ether.",
-    "Neural networks whisper secrets of pattern recognition, teaching machines to see faces in noise and meaning in chaos. Intelligence emerges from artificial depths.",
-    "The future unfolds in quantum leaps and digital footsteps, each line of code a step toward tomorrow's possibilities. Reality reconstructs itself in endless iterations.",
-  ]
+const nowStamp = () => {
+  const d = new Date()
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
+}
+
+// TEXT frame: 1380x312, we remove inset/padding to maximize.
+// Usable ~296px tall. At 13px * 1.35 lineHeight ≈ 17.5px + 2px gap = ~19.5px/line → ~15 lines
+const MAX_LINES = 15
+
+const StreamingTextComponent = () => {
+  const [lines, setLines] = useState<ThinkingEntry[]>([])
+  const containerRef = useRef<HTMLDivElement>(null)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const keyRef = useRef(0)
+  const wsRef = useRef<WebSocket | null>(null)
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      const randomLine = corpus[Math.floor(Math.random() * corpus.length)]
-      keyRef.current++
-      setLines(prev => {
-        const newLines = [...prev, { text: randomLine, key: keyRef.current }]
-        return newLines.length > 4 ? newLines.slice(-4) : newLines
-      })
-    }, 3000)
-    return () => clearInterval(interval)
+    let isMounted = true
+    mountedRef.current = true
+
+    const connect = () => {
+      if (!isMounted) return
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
+
+      // Close old connection if exists
+      if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+        wsRef.current.close()
+      }
+
+      const ws = new WebSocket('ws://localhost:8765/ws')
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        if (!isMounted) return
+        setConnected(true)
+        keyRef.current++
+        setLines(prev => [...prev, { text: 'Connected to Jarvis', type: 'separator', key: keyRef.current, time: nowStamp() }].slice(-MAX_LINES))
+      }
+
+      ws.onmessage = (event) => {
+        if (!isMounted) return
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.type === 'thinking' && Array.isArray(msg.entries)) {
+            const ts = nowStamp()
+            setLines(prev => {
+              const newEntries: ThinkingEntry[] = msg.entries.map((e: { text: string; type?: string }) => {
+                keyRef.current++
+                return { text: e.text, type: e.type || 'input', key: keyRef.current, time: ts }
+              })
+              return [...prev, ...newEntries].slice(-MAX_LINES)
+            })
+          } else if (msg.type === 'camera' && msg.data) {
+            // Broadcast camera frame to all listeners
+            window.dispatchEvent(new CustomEvent('jarvis-camera-frame', { detail: { image: msg.data } }))
+          } else if (msg.type === 'ai_state' && msg.state) {
+            // Broadcast AI state to light spots component
+            window.dispatchEvent(new CustomEvent('jarvis-ai-state', { detail: { state: msg.state } }))
+          }
+        } catch {}
+      }
+
+      ws.onclose = () => {
+        if (!isMounted) return
+        setConnected(false)
+        wsRef.current = null
+        reconnectRef.current = setTimeout(connect, 3000)
+      }
+
+      ws.onerror = () => { if (ws) ws.close() }
+    }
+
+    connect()
+
+    return () => {
+      isMounted = false
+      mountedRef.current = false
+      if (reconnectRef.current) clearTimeout(reconnectRef.current)
+      if (wsRef.current) wsRef.current.close()
+    }
   }, [])
 
   useEffect(() => {
     if (containerRef.current) containerRef.current.scrollTop = containerRef.current.scrollHeight
   }, [lines])
 
+  // Counter-scale: the App root scales with scale(sw, sh) independently,
+  // which distorts text. We invert the Y-axis stretch so text stays square.
+  useEffect(() => {
+    const fix = () => {
+      const el = wrapperRef.current
+      if (!el) return
+      const sh = window.innerHeight / 1024
+      const sw = window.innerWidth / 1440
+      // Parent is already scaled by (sw, sh). To undo the distortion
+      // we scale content by (1, sw/sh) so effective Y = sh * (sw/sh) = sw = X.
+      const ratio = sw / sh
+      el.style.transform = `scaleY(${ratio})`
+      el.style.transformOrigin = 'top left'
+      // Adjust container height so it fills the frame after inverse scale
+      el.style.height = `${100 / ratio}%`
+    }
+    fix()
+    window.addEventListener('resize', fix)
+    return () => window.removeEventListener('resize', fix)
+  }, [])
+
   return (
-    <div ref={containerRef} className="w-full h-full rounded-[2px] p-6 overflow-hidden relative">
-      <style>{`
-        @keyframes textFadeIn {
-          0% { opacity: 0; transform: translateY(8px); filter: blur(4px); }
-          100% { opacity: 1; transform: translateY(0); filter: blur(0); }
-        }
-        .text-fade-line {
-          animation: textFadeIn 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
-        }
-        @keyframes cursorBlink {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0; }
-        }
-      `}</style>
-      <div className="space-y-4">
-        {lines.map((line, index) => {
-          const fadeOpacity = index === 0 ? 0.35 : index === 1 ? 0.55 : index === 2 ? 0.75 : 1
-          const r = 200, g = 200, b = 200
-          const textColor = `rgba(${r}, ${g}, ${b}, ${fadeOpacity})`
-          const glowColor = `rgba(${r}, ${g}, ${b}, ${fadeOpacity * 0.6})`
-          const isLast = index === lines.length - 1
-          return (
-            <p
-              key={line.key}
-              className="text-sm leading-relaxed tracking-wide font-mono text-fade-line"
-              style={{
-                color: textColor,
-                maskImage: 'linear-gradient(90deg, white 0%, white 75%, transparent 100%)',
-                WebkitMaskImage: 'linear-gradient(90deg, white 0%, white 75%, transparent 100%)',
-                position: 'relative',
-              }}
-            >
-              {line.text}
-              {isLast && (
-                <span style={{
-                  display: 'inline-block',
-                  width: '2px',
-                  height: '1em',
-                  marginLeft: '2px',
-                  background: glowColor,
-                  boxShadow: `0 0 8px 3px ${glowColor}, 0 0 16px 6px rgba(${r},${g},${b},${fadeOpacity * 0.2})`,
-                  verticalAlign: 'text-bottom',
-                  animation: 'cursorBlink 1s step-end infinite',
-                }} />
-              )}
-            </p>
-          )
-        })}
+    <div ref={wrapperRef} className="w-full h-full">
+      <div ref={containerRef} className="w-full h-full overflow-hidden relative" style={{ padding: '8px 12px' }}>
+        <style>{`
+          @keyframes textFadeIn {
+            0% { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+            100% { opacity: 1; transform: translateY(0); filter: blur(0); }
+          }
+          .text-fade-line {
+            animation: textFadeIn 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+          }
+          @keyframes cursorBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+          }
+        `}</style>
+        <div className="space-y-[2px]">
+          {lines.map((line, index) => {
+            const total = lines.length
+            const fadeOpacity = total <= 1 ? 1 : 0.25 + 0.75 * (index / (total - 1))
+            const isSep = line.type === 'separator'
+            const isLast = index === lines.length - 1
+
+            if (isSep) {
+              return (
+                <div key={line.key} className="text-fade-line" style={{
+                  color: 'rgba(180,180,180,0.35)', fontSize: '11px', borderTop: '1px solid #1a1a1a',
+                  marginTop: '4px', paddingTop: '2px',
+                  fontFamily: "'Courier New', monospace",
+                  opacity: fadeOpacity,
+                }}>
+                  <span style={{ color: 'rgba(140,140,140,0.5)', marginRight: '8px' }}>{line.time}</span>
+                  {line.text}
+                </div>
+              )
+            }
+
+            return (
+              <p
+                key={line.key}
+                className="text-fade-line"
+                style={{
+                  color: `rgba(185,185,185,${fadeOpacity})`,
+                  fontSize: '13px',
+                  lineHeight: '1.35',
+                  fontFamily: "'Courier New', monospace",
+                  position: 'relative',
+                  margin: 0,
+                }}
+              >
+                <span style={{ color: `rgba(120,120,120,${fadeOpacity * 0.6})`, marginRight: '8px', fontSize: '11px' }}>{line.time}</span>
+                {line.text}
+                {isLast && (
+                  <span style={{
+                    display: 'inline-block', width: '1.5px', height: '1em',
+                    marginLeft: '2px',
+                    background: 'rgba(185,185,185,0.6)',
+                    verticalAlign: 'text-bottom',
+                    animation: 'cursorBlink 1s step-end infinite',
+                  }} />
+                )}
+              </p>
+            )
+          })}
+        </div>
       </div>
-      <div
-        className="absolute bottom-0 left-0 right-0 h-20 pointer-events-none"
-        style={{
-          background: 'linear-gradient(to top, rgba(12,12,12,1) 0%, rgba(12,12,12,0) 100%)',
-        }}
-      />
     </div>
   )
 }
@@ -1604,8 +1567,8 @@ function App() {
         `
       }}
     >
-      <PixelBackgroundComponent />
-      <LightSpotsComponent />
+      {/* <PixelBackgroundComponent /> */}
+      {/* <LightSpotsComponent /> */}
 
       {FRAMES.map((frame) => (
         <div
@@ -1629,7 +1592,7 @@ function App() {
                   borderRightWidth: '1px',
                 }}
               />
-              <div className="absolute inset-[10px] p-[19px_19px]">
+              <div className="absolute inset-[10px]">
                 <StreamingTextComponent />
               </div>
               <style>{`
@@ -1680,7 +1643,7 @@ function App() {
 
           {frame.id === 'video2' && (
             <div className="absolute overflow-hidden pointer-events-auto" style={{ left: `${10 + (frame.width - 20) * 0.05}px`, top: `${10 + (frame.height - 20) * 0.05}px`, width: `${(frame.width - 20) * 0.9}px`, height: `${(frame.height - 20) * 0.9}px` }}>
-              <VideoDitheringComponent label="FEED 02" />
+              <ScreenMirrorComponent />
             </div>
           )}
 

@@ -54,7 +54,7 @@ async def main(args):
     logger.info("  Jarvis — Proactive AI Assistant")
     logger.info(f"  Mode: {mode}")
     logger.info("=" * 50)
-    logger.info(f"  Camera:  {'ON' if args.camera else 'OFF'}")
+    logger.info(f"  Camera:  {'ON' if args.camera else 'OFF (Web UI uses camera)'}")
     logger.info(f"  Desktop: {'ON' if args.desktop else 'OFF'}")
     if args.streaming:
         logger.info(f"  Audio:   STREAMING (native, 24kHz)")

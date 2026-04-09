@@ -98,24 +98,48 @@ class NativeOverlay:
         """Attach a ThinkingBridge for broadcasting to web clients."""
         self._ws_bridge = bridge
 
+    def push_camera_frame(self, image_base64: str):
+        """推送摄像头帧到网页（base64编码）"""
+        if self._ws_bridge:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._ws_bridge.broadcast_camera(image_base64))
+                else:
+                    loop.run_until_complete(self._ws_bridge.broadcast_camera(image_base64))
+            except RuntimeError:
+                pass
+
+    def push_ai_state(self, state: str):
+        """推送 AI 状态到网页: 'observe' (观察，光斑散开) 或 'execute' (执行，光斑聚合)"""
+        if self._ws_bridge and state in ["observe", "execute"]:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._ws_bridge.broadcast_state(state))
+                else:
+                    loop.run_until_complete(self._ws_bridge.broadcast_state(state))
+            except RuntimeError:
+                pass
+
     def push_thinking(self, entries: list[dict]):
-        """Push entries to the thinking log panel.
+        """Push entries to web clients via WebSocket bridge.
 
         Each entry: {"text": "...", "type": "input|reason|decision|action|feedback|separator"}
+        Native overlay thinking panel is disabled — all thinking goes to web only.
         """
-        if entries:
-            self._send({"action": "thinking", "entries": entries})
-            # Also broadcast to web clients
-            if self._ws_bridge:
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.ensure_future(self._ws_bridge.broadcast(entries))
-                    else:
-                        loop.run_until_complete(self._ws_bridge.broadcast(entries))
-                except RuntimeError:
-                    pass
+        if entries and self._ws_bridge:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._ws_bridge.broadcast(entries))
+                else:
+                    loop.run_until_complete(self._ws_bridge.broadcast(entries))
+            except RuntimeError:
+                pass
 
     def close_all(self):
         self._send({"action": "close_all"})

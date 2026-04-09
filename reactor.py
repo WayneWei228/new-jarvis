@@ -29,6 +29,11 @@ import anthropic
 from google import genai
 from google.genai import types as gtypes
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 from input import InputCollector
 from brain.memory import MemoryStore
 from executor.overlay import NativeOverlay
@@ -230,6 +235,20 @@ class Reactor:
         self._conversation_history: list[dict] = []  # {time, role, text}
         self._history_max = 30  # keep last 30 entries
 
+        # Insta360 摄像头连接（索引 1）用于推送到前端
+        self._insta360_cap = None
+        if cv2:
+            try:
+                self._insta360_cap = cv2.VideoCapture(1)  # Insta360 是索引 1
+                if self._insta360_cap.isOpened():
+                    logger.info("✅ Insta360 camera (index 1) initialized for streaming to web")
+                else:
+                    logger.warning("⚠️ Insta360 camera (index 1) not available")
+                    self._insta360_cap = None
+            except Exception as e:
+                logger.error(f"Failed to initialize Insta360 camera: {e}")
+                self._insta360_cap = None
+
     @staticmethod
     def _load_profile(name: str) -> dict:
         """Load a user profile from profiles/<name>.json."""
@@ -332,6 +351,24 @@ class Reactor:
         ])
         self._push_input_summary(snapshot)
 
+        # Push Insta360 camera frame to web
+        # 从索引 1（Insta360）读取帧并推送到前端（左下角摄像头框）
+        if self._insta360_cap and self._insta360_cap.isOpened():
+            ret, frame = self._insta360_cap.read()
+            if ret:
+                # 编码为 JPEG
+                _, buffer = cv2.imencode('.jpg', frame)
+                jpeg_bytes = buffer.tobytes()
+                # 转换为 base64
+                b64_frame = base64.b64encode(jpeg_bytes).decode('utf-8')
+                # 推送到前端
+                self.overlay.push_camera_frame(b64_frame)
+        else:
+            # Fallback: 推送 InputCollector 的本地摄像头帧
+            frames = snapshot["physiological"].get("camera_frames", [])
+            if frames and frames[-1].get("image"):
+                self.overlay.push_camera_frame(frames[-1]["image"])
+
         # Call Haiku
         self.overlay.push_thinking([
             {"text": "Haiku 观察中 ...", "type": "reason"},
@@ -379,6 +416,7 @@ class Reactor:
 
         if action_type == "reply":
             reply_text = result.get("reply", "")
+            self.overlay.push_ai_state("observe")  # 回复时光斑散开
             if reply_text:
                 logger.info(f"[REPLY] {reply_text[:60]}")
                 self.overlay.push_thinking([
@@ -401,12 +439,15 @@ class Reactor:
                 self.overlay.push_thinking([
                     {"text": f"节流: {action[:40]}", "type": "decision"},
                 ])
+                self.overlay.push_ai_state("observe")  # 节流时光斑散开
                 return
 
+            self.overlay.push_ai_state("execute")  # 执行时光斑聚合
             await self._execute(action, execution_prompt, reason)
 
         else:  # observe
             logger.debug(f"[OBSERVE] {reason[:60]}")
+            self.overlay.push_ai_state("observe")  # 观察时光斑散开
             self.overlay.push_thinking([
                 {"text": f"观察: {reason[:50]}", "type": "decision"},
             ])
