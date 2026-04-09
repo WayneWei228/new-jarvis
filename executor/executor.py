@@ -19,7 +19,8 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from anthropic import AnthropicBedrock
+from google import genai
+from google.genai import types as gtypes
 
 from brain.memory import MemoryStore
 from executor.overlay import NativeOverlay
@@ -67,9 +68,8 @@ class Executor:
 
         self.memory = MemoryStore(memory_dir=memory_dir)
 
-        # AWS Bedrock
-        self._token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
-        self._region = os.environ.get("AWS_DEFAULT_REGION", "ap-northeast-1")
+        # Gemini client
+        self._gemini = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
 
     async def start(self) -> None:
         """Start watching for new decisions."""
@@ -212,17 +212,16 @@ class Executor:
 
 请直接执行以上决策，产出对用户有价值的内容。"""
 
-        client = AnthropicBedrock(
-            aws_region=self._region,
-            api_key=self._token,
+        response = self._gemini.models.generate_content(
+            model="gemini-3-flash-preview",
+            contents=prompt,
+            config=gtypes.GenerateContentConfig(
+                system_instruction=EXECUTOR_SYSTEM_PROMPT,
+                max_output_tokens=2048,
+                temperature=0.3,
+            ),
         )
-        response = client.messages.create(
-            model="apac.anthropic.claude-sonnet-4-20250514-v1:0",
-            max_tokens=2048,
-            system=EXECUTOR_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text
+        return response.text
 
     def _save_result(self, decision: dict, result: str, decision_file: str) -> None:
         """Save execution result to file and memory."""
