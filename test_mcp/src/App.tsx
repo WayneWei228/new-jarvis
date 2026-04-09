@@ -1018,13 +1018,12 @@ const VideoDitheringComponent = ({ label }: { label: string }) => {
 
   return (
     <div className={`w-full h-full relative bg-black rounded-[10px] overflow-hidden border border-solid border-white`}>
-      {hasFrame ? (
-        <canvas
-          ref={canvasRef}
-          className="block w-full h-full"
-          style={{ borderRadius: '10px', objectFit: 'cover' }}
-        />
-      ) : (
+      <canvas
+        ref={canvasRef}
+        className="block w-full h-full"
+        style={{ borderRadius: '10px', objectFit: 'cover', display: hasFrame ? 'block' : 'none' }}
+      />
+      {!hasFrame && (
         <div className="w-full h-full flex items-center justify-center bg-gray-900 text-gray-400">
           <div className="text-center">
             <div className="text-2xl mb-2">📷</div>
@@ -1269,7 +1268,6 @@ const StreamingTextComponent = () => {
 
       ws.onopen = () => {
         if (!isMounted) return
-        setConnected(true)
         keyRef.current++
         setLines(prev => [...prev, { text: 'Connected to Jarvis', type: 'separator', key: keyRef.current, time: nowStamp() }].slice(-MAX_LINES))
       }
@@ -1299,7 +1297,6 @@ const StreamingTextComponent = () => {
 
       ws.onclose = () => {
         if (!isMounted) return
-        setConnected(false)
         wsRef.current = null
         reconnectRef.current = setTimeout(connect, 3000)
       }
