@@ -241,7 +241,13 @@ class Reactor:
             try:
                 self._insta360_cap = cv2.VideoCapture(1)  # Insta360 是索引 1
                 if self._insta360_cap.isOpened():
-                    logger.info("✅ Insta360 camera (index 1) initialized for streaming to web")
+                    # Try to read first frame to verify it works
+                    ret, _ = self._insta360_cap.read()
+                    if ret:
+                        logger.info("✅ Insta360 camera (index 1) initialized and working")
+                    else:
+                        logger.warning("⚠️ Insta360 camera (index 1) opened but cannot read frames")
+                        self._insta360_cap = None
                 else:
                     logger.warning("⚠️ Insta360 camera (index 1) not available")
                     self._insta360_cap = None
@@ -331,6 +337,28 @@ class Reactor:
 
         # Grab latest inputs
         snapshot = self.collector.get_snapshot(window_sec=5.0)
+
+        # Push Insta360 camera frame to web FIRST (every tick, regardless of events)
+        # 从索引 1（Insta360）读取帧并推送到前端（左下角摄像头框）
+        if self._insta360_cap and self._insta360_cap.isOpened():
+            ret, frame = self._insta360_cap.read()
+            if ret:
+                # 编码为 JPEG
+                _, buffer = cv2.imencode('.jpg', frame)
+                jpeg_bytes = buffer.tobytes()
+                # 转换为 base64
+                b64_frame = base64.b64encode(jpeg_bytes).decode('utf-8')
+                # 推送到前端
+                self.overlay.push_camera_frame(b64_frame)
+            else:
+                logger.warning("⚠️ Failed to read frame from Insta360 camera")
+        else:
+            # Fallback: 推送 InputCollector 的本地摄像头帧
+            frames = snapshot["physiological"].get("camera_frames", [])
+            if frames and frames[-1].get("image"):
+                self.overlay.push_camera_frame(frames[-1]["image"])
+
+        # Skip AI analysis if no events
         if snapshot["total_events"] == 0:
             return
 
@@ -350,24 +378,6 @@ class Reactor:
             {"text": f"── Tick #{self._react_round} ──", "type": "separator"},
         ])
         self._push_input_summary(snapshot)
-
-        # Push Insta360 camera frame to web
-        # 从索引 1（Insta360）读取帧并推送到前端（左下角摄像头框）
-        if self._insta360_cap and self._insta360_cap.isOpened():
-            ret, frame = self._insta360_cap.read()
-            if ret:
-                # 编码为 JPEG
-                _, buffer = cv2.imencode('.jpg', frame)
-                jpeg_bytes = buffer.tobytes()
-                # 转换为 base64
-                b64_frame = base64.b64encode(jpeg_bytes).decode('utf-8')
-                # 推送到前端
-                self.overlay.push_camera_frame(b64_frame)
-        else:
-            # Fallback: 推送 InputCollector 的本地摄像头帧
-            frames = snapshot["physiological"].get("camera_frames", [])
-            if frames and frames[-1].get("image"):
-                self.overlay.push_camera_frame(frames[-1]["image"])
 
         # Call Haiku
         self.overlay.push_thinking([

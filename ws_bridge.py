@@ -68,6 +68,7 @@ class ThinkingBridge:
             return
         msg = json.dumps({"type": "camera", "data": image_base64}, ensure_ascii=False)
         dead = set()
+        logger.debug(f"📹 Broadcasting camera frame to {len(self._clients)} clients ({len(msg)} bytes)")
         for ws in list(self._clients):
             try:
                 await ws.send_str(msg)
