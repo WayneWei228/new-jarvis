@@ -82,9 +82,33 @@ SKILLS = {
     "url-to-lark-doc": {
         "name": "URL 转飞书文档",
         "description": "Fetch URLs, analyze content, create Feishu docs",
-        "trigger": ["feishu", "飞书", "文档", "整理"],
+        "trigger": ["url", "链接", "网址", "整理url"],
         "cli": None,
         "params": ["urls", "title"],
+        "type": "action",
+    },
+    "lark-im": {
+        "name": "飞书消息",
+        "description": "Send Feishu instant messages to users or groups",
+        "trigger": ["飞书消息", "lark消息", "发飞书", "飞书通知"],
+        "cli": "lark-cli im",
+        "params": ["user_id", "content", "chat_id"],
+        "type": "action",
+    },
+    "lark-doc": {
+        "name": "飞书文档",
+        "description": "Create and manage Feishu cloud documents",
+        "trigger": ["飞书文档", "创建文档", "lark文档", "飞书记录"],
+        "cli": "lark-cli docs",
+        "params": ["title", "content", "folder_token"],
+        "type": "action",
+    },
+    "lark-calendar": {
+        "name": "飞书日历",
+        "description": "Create and manage Feishu calendar events",
+        "trigger": ["飞书日历", "日历事件", "日程"],
+        "cli": "lark-cli calendar",
+        "params": ["summary", "start_time", "end_time"],
         "type": "action",
     },
 }
@@ -98,15 +122,28 @@ class SkillRegistry:
         self.skills = self._load_skills()
 
     def _load_skills(self) -> dict[str, dict]:
-        """Load skill metadata from SKILLS dict and verify they exist."""
+        """Load skill metadata from SKILLS dict.
+
+        Note: Some skills (like lark-cli) don't have a local directory,
+        but are still available via CLI command.
+        """
         loaded = {}
         for skill_id, meta in SKILLS.items():
             skill_path = self.skills_dir / skill_id
-            if skill_path.exists():
-                loaded[skill_id] = meta
-                logger.debug(f"✓ Skill loaded: {skill_id}")
+            has_local_dir = skill_path.exists()
+
+            # Skills with local directories get logged as verified
+            if has_local_dir:
+                logger.debug(f"✓ Skill loaded (with local dir): {skill_id}")
             else:
-                logger.warning(f"⚠ Skill directory not found: {skill_path}")
+                # Skills without local dir (e.g., lark-cli) are still valid if they have a CLI
+                if meta.get("cli"):
+                    logger.debug(f"✓ Skill loaded (CLI-based): {skill_id}")
+                else:
+                    logger.warning(f"⚠ Skill {skill_id} has no local dir and no CLI command")
+
+            loaded[skill_id] = meta
+
         return loaded
 
     def get_all(self) -> dict[str, dict]:
