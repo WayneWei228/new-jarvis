@@ -56,9 +56,9 @@ SKILLS = {
         "type": "action",
     },
     "macos-calendar": {
-        "name": "日历管理",
+        "name": "Mac 日历",
         "description": "Create/list macOS Calendar events",
-        "trigger": ["calendar", "日历", "事件"],
+        "trigger": ["calendar", "mac日历", "苹果日历", "系统日历"],
         "cli": '"{skill_dir}/scripts/calendar.sh"',
         "params": ["action", "summary", "date"],
         "type": "action",
@@ -106,7 +106,7 @@ SKILLS = {
     "lark-calendar": {
         "name": "飞书日历",
         "description": "Create and manage Feishu calendar events",
-        "trigger": ["飞书日历", "日历事件", "日程"],
+        "trigger": ["飞书日历", "飞书日程", "飞书事件"],
         "cli": "lark-cli calendar",
         "params": ["summary", "start_time", "end_time"],
         "type": "action",
