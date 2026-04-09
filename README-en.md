@@ -184,7 +184,6 @@ These can be managed in **System Settings → Privacy & Security**.
 | Speech Recognition | iFlytek WebSocket streaming ASR |
 | Camera Capture | OpenCV |
 | Audio Recording | sounddevice + NumPy |
-| Native Overlay | PyObjC (AppKit `NSPanel` + `WKWebView`) |
 | Async Runtime | asyncio + aiohttp |
 
 ## Contributing
