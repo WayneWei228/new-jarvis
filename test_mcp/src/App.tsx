@@ -1,4 +1,4 @@
-﻿﻿import { useState, useEffect, useRef, useCallback } from 'react'
+﻿﻿﻿﻿﻿import { useState, useEffect, useRef, useCallback } from 'react'
 
 interface LightSpot {
   id: number
@@ -661,14 +661,6 @@ const LightSpotsComponent = () => {
         if (gatheringRef.current && gatherProgressRef.current > 0.3) {
           const glowAlpha = (gatherProgressRef.current - 0.3) / 0.7 * 0.6
           const pulse = Math.sin(time * 0.002) * 0.15 + 0.85
-          const glowR = 90 * pulse
-          const eyeGlow = ctx.createRadialGradient(EYE_CENTER_X, EYE_CENTER_Y, 0, EYE_CENTER_X, EYE_CENTER_Y, glowR)
-          eyeGlow.addColorStop(0, `rgba(255, 255, 255, ${glowAlpha * 0.9})`)
-          eyeGlow.addColorStop(0.2, `rgba(200, 255, 230, ${glowAlpha * 0.6})`)
-          eyeGlow.addColorStop(0.5, `rgba(100, 200, 150, ${glowAlpha * 0.3})`)
-          eyeGlow.addColorStop(1, `rgba(50, 150, 100, 0)`)
-          ctx.fillStyle = eyeGlow
-          ctx.fillRect(EYE_CENTER_X - glowR, EYE_CENTER_Y - glowR, glowR * 2, glowR * 2)
 
           const pupilSwayXGlow = Math.sin(time * 0.0008) * 55 + Math.sin(time * 0.0013 + 1.2) * 25
           const pupilSwayYGlow = Math.cos(time * 0.0006) * 12 + Math.sin(time * 0.001 + 2.5) * 8
@@ -676,6 +668,15 @@ const LightSpotsComponent = () => {
           const ease = gp * gp * (3 - 2 * gp)
           const pupilCX = EYE_CENTER_X + pupilSwayXGlow * ease
           const pupilCY = EYE_CENTER_Y + pupilSwayYGlow * ease
+
+          const glowR = 90 * pulse
+          const eyeGlow = ctx.createRadialGradient(pupilCX, pupilCY, 0, pupilCX, pupilCY, glowR)
+          eyeGlow.addColorStop(0, `rgba(255, 255, 255, ${glowAlpha * 0.9})`)
+          eyeGlow.addColorStop(0.2, `rgba(200, 255, 230, ${glowAlpha * 0.6})`)
+          eyeGlow.addColorStop(0.5, `rgba(100, 200, 150, ${glowAlpha * 0.3})`)
+          eyeGlow.addColorStop(1, `rgba(50, 150, 100, 0)`)
+          ctx.fillStyle = eyeGlow
+          ctx.fillRect(pupilCX - glowR, pupilCY - glowR, glowR * 2, glowR * 2)
 
           ctx.save()
           ctx.filter = `blur(${18 + Math.sin(time * 0.003) * 4}px)`
@@ -857,6 +858,20 @@ const LightSpotsComponent = () => {
     }
   }, [])
 
+  useEffect(() => {
+    const onFaceDetected = (e: Event) => {
+      const { hasFace } = (e as CustomEvent).detail
+      if (hasFace && !gatheringRef.current) {
+        gatheringRef.current = true
+      } else if (!hasFace && gatheringRef.current) {
+        gatheringRef.current = false
+        gatherProgressRef.current = Math.max(gatherProgressRef.current, 0.01)
+      }
+    }
+    window.addEventListener('face-detected', onFaceDetected)
+    return () => window.removeEventListener('face-detected', onFaceDetected)
+  }, [])
+
   return (
     <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 10 }}>
       <canvas
@@ -877,6 +892,25 @@ const FACE_API_MODELS = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.1
 let faceApiLoaded = false
 let faceApiLoading = false
 let faceApiReady = false
+let lastFaceDetectedTime = 0
+let faceGreeted = false
+let ttsUtterance: SpeechSynthesisUtterance | null = null
+
+function speakHello() {
+  if (ttsUtterance) return
+  const u = new SpeechSynthesisUtterance('\u4f60\u597d')
+  u.lang = 'zh-CN'
+  u.rate = 1
+  u.pitch = 1
+  u.onend = () => { ttsUtterance = null }
+  u.onerror = () => { ttsUtterance = null }
+  ttsUtterance = u
+  window.speechSynthesis.speak(u)
+}
+
+function notifyFaceDetected(hasFace: boolean) {
+  window.dispatchEvent(new CustomEvent('face-detected', { detail: { hasFace } }))
+}
 
 function loadFaceApi(): Promise<void> {
   if (faceApiLoaded) return Promise.resolve()
@@ -931,8 +965,29 @@ const VideoDitheringComponent = ({ label }: { label: string }) => {
           setHasPermission(true)
           setError('')
         }
-      } catch (err) {
-        setError('Camera access denied or not available')
+      } catch (err: any) {
+        console.error('Camera error:', err?.name, err?.message, err)
+        if (err?.name === 'NotAllowedError') {
+          setError('Camera permission denied. Please allow camera access.')
+        } else if (err?.name === 'NotFoundError') {
+          setError('No camera found on this device.')
+        } else if (err?.name === 'NotReadableError') {
+          setError('Camera is in use by another application.')
+        } else if (err?.name === 'OverconstrainedError') {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true })
+            if (videoRef.current) {
+              videoRef.current.srcObject = stream
+              setHasPermission(true)
+              setError('')
+            }
+            return
+          } catch {
+            setError('Camera not available.')
+          }
+        } else {
+          setError(`Camera error: ${err?.message || 'Unknown'}`)
+        }
         setHasPermission(false)
       }
     }
@@ -1032,6 +1087,21 @@ const VideoDitheringComponent = ({ label }: { label: string }) => {
             .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
             .withFaceLandmarks(true)
             .withFaceExpressions()
+
+          const now = Date.now()
+          if (detections.length > 0) {
+            lastFaceDetectedTime = now
+            if (!faceGreeted) {
+              faceGreeted = true
+              speakHello()
+              notifyFaceDetected(true)
+            }
+          } else {
+            if (faceGreeted && now - lastFaceDetectedTime > 3000) {
+              faceGreeted = false
+              notifyFaceDetected(false)
+            }
+          }
 
           for (const det of detections) {
             const box = det.detection.box
@@ -1158,7 +1228,7 @@ const VideoDitheringComponent = ({ label }: { label: string }) => {
   }, [hasPermission])
 
   return (
-    <div className="w-full h-full relative bg-black rounded-[2px] overflow-hidden border border-solid border-white">
+    <div className="w-full h-full relative bg-black rounded-[10px] overflow-hidden border border-solid border-white">
       <video ref={videoRef} autoPlay playsInline muted className="hidden" />
       {hasPermission ? (
         <div className="relative w-full h-full">
@@ -1283,8 +1353,8 @@ const SoundWaveComponent = () => {
   }, [])
 
   return (
-    <div className="w-full h-full bg-black rounded-[2px] overflow-hidden">
-      <canvas ref={canvasRef} width={331} height={309} className="w-full h-full" style={{ boxSizing: 'content-box', borderRadius: '6px', border: '1px solid #ffffff' }} />
+    <div className="w-full h-full bg-black rounded-[10px] overflow-hidden" style={{ border: '1px solid #ffffff', borderRadius: '10px' }}>
+      <canvas ref={canvasRef} width={331} height={309} className="w-full h-full" />
     </div>
   )
 }
@@ -1513,10 +1583,9 @@ function App() {
       if (!el) return
       const sw = window.innerWidth / 1440
       const sh = window.innerHeight / 1024
-      const scale = Math.min(sw, sh)
-      el.style.transform = `scale(${scale})`
-      el.style.left = `${(window.innerWidth - 1440 * scale) / 2}px`
-      el.style.top = `${(window.innerHeight - 1024 * scale) / 2}px`
+      el.style.transform = `scale(${sw}, ${sh})`
+      el.style.left = '0px'
+      el.style.top = '0px'
     }
 
     resize()
