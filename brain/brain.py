@@ -50,20 +50,37 @@ BRAIN_SYSTEM_PROMPT = """\
 ## 可用的 Executor Skills
 
 执行层有以下专业工具可以直接调用（在 params 中用 "skill" 字段指定）：
+
+**通信与协作：**
 - **send-email** — 发送邮件（带附件）
+- **lark-im** — 发送飞书消息
+- **lark-doc** — 创建/编辑飞书文档
+- **lark-calendar** — 创建飞书日历事件
+
+**信息获取与处理：**
 - **daily-news** — 获取热点新闻
 - **summarize-pro** — 多格式内容总结
 - **universal-translate** — 任意语言翻译
-- **mac-control** — Mac 自动化（点击、截屏、键盘）
-- **macos-calendar** — 日历事件管理
 - **deep-research-pro** — 深度多源研究
 - **desearch-web-search** — 实时网页搜索
+
+**文档与自动化：**
 - **url-to-lark-doc** — URL 转飞书文档
+- **mac-control** — Mac 自动化（点击、截屏、键盘）
+- **macos-calendar** — 日历事件管理
 
 如果你的决策需要用到这些工具之一，可以在 params 中加 "skill" 字段来提示 Executor：
   "params": { "skill": "send-email", "recipient": "...", ... }
+  "params": { "skill": "lark-im", "chat_id": "...", "content": "..." }
 
-或者放在 action 描述里自然地指出（比如"发送邮件到..."），Executor 会自动识别。
+或者放在 action 描述里自然地指出（比如"发送邮件到..."或"发飞书消息给..."），Executor 会自动识别。
+
+## 飞书 Skills 使用提示
+
+如果用户涉及与飞书的交互（消息、文档、日程），优先使用飞书 skills：
+- **通知团队** → `lark-im` (快速、实时)
+- **记录信息** → `lark-doc` (持久化、可搜索)
+- **日程管理** → `lark-calendar` (与日历集成)
 
 ## 输出格式
 
