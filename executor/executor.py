@@ -23,6 +23,7 @@ from anthropic import AnthropicBedrock
 
 from brain.memory import MemoryStore
 from executor.overlay import NativeOverlay
+from executor.skill_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -109,12 +110,19 @@ class Executor:
             await self._execute(decision, f.name)
 
     async def _execute(self, decision: dict, filename: str) -> None:
-        """Execute a single decision."""
+        """Execute a single decision.
+
+        Strategy:
+        1. Check if decision specifies a skill in params or can be detected from action
+        2. If skill match → call skill directly
+        3. Otherwise → call LLM to produce content
+        """
         action = decision.get("action", "unknown")
         reason = decision.get("reason", "")
         plan = decision.get("plan", "")
         priority = decision.get("priority", "medium")
         confidence = decision.get("confidence", 0)
+        params = decision.get("params", {})
 
         # Skip low-confidence or no_action
         if confidence < 0.5 or "no_action" in action.lower():
@@ -130,24 +138,50 @@ class Executor:
             timeout=15,
         )
 
-        # 2. Call LLM to produce actual content
-        logger.info(f"Executing: {action}")
-        try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, self._call_llm, decision
-            )
-        except Exception as e:
-            logger.error(f"Execution LLM call failed: {e}")
-            self.overlay.show_card(
-                title="Error",
-                body=str(e)[:200],
-                card_type="warning",
-                timeout=10,
-            )
-            return
+        # 2. Try to match skill from decision
+        skill_registry = get_registry()
+        skill_id = params.get("skill")  # Explicit skill in params
+        result = None
 
-        # 3. Close thinking card, show result
+        if not skill_id:
+            # Try to auto-detect skill from action text
+            matches = skill_registry.find_by_trigger(action)
+            if matches:
+                skill_id, skill_meta = matches[0]
+                logger.info(f"Auto-detected skill: {skill_id} from action")
+
+        # 3a. If skill matched, call it directly
+        if skill_id and skill_registry.get(skill_id):
+            logger.info(f"Executing skill: {skill_id}")
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, skill_registry.call, skill_id, params
+                )
+                logger.info(f"Skill {skill_id} returned: {len(result) if result else 0} chars")
+            except Exception as e:
+                logger.error(f"Skill execution failed: {e}")
+                result = None
+
+        # 3b. If no skill or skill failed, fall back to LLM
+        if not result:
+            logger.info(f"Executing via LLM: {action}")
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, self._call_llm, decision
+                )
+            except Exception as e:
+                logger.error(f"Execution LLM call failed: {e}")
+                self.overlay.show_card(
+                    title="Error",
+                    body=str(e)[:200],
+                    card_type="warning",
+                    timeout=10,
+                )
+                return
+
+        # 4. Close thinking card, show result
         self.overlay.close_all()
         self.overlay.show_card(
             title=action[:60],
@@ -158,7 +192,7 @@ class Executor:
             timeout=60,  # Results stay longer
         )
 
-        # 4. Save result
+        # 5. Save result
         self._save_result(decision, result, filename)
         logger.info(f"Executed: {action} ({len(result)} chars)")
 
