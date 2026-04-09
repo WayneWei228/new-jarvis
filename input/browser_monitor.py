@@ -63,6 +63,19 @@ def _chrome_timestamp_to_unix(chrome_ts: int) -> float:
     return (chrome_ts - 11644473600_000_000) / 1_000_000
 
 
+def _get_chrome_bookmarks_path() -> Path | None:
+    """Get Chrome's Bookmarks JSON path."""
+    system = platform.system()
+    home = Path.home()
+    paths = {
+        "Darwin": home / "Library/Application Support/Google/Chrome/Default/Bookmarks",
+        "Linux": home / ".config/google-chrome/Default/Bookmarks",
+        "Windows": home / "AppData/Local/Google/Chrome/User Data/Default/Bookmarks",
+    }
+    path = paths.get(system)
+    return path if path and path.exists() else None
+
+
 class BrowserMonitor:
     """Monitors Chrome browser history for new visits and bookmarks."""
 
@@ -73,11 +86,19 @@ class BrowserMonitor:
         initial_history: int = 20,
     ):
         self.poll_interval = poll_interval
-        self.initial_history = initial_history  # load N most recent visits on startup
+        self.initial_history = initial_history
         self._history_path = Path(history_path) if history_path else None
         self._running = False
         self._last_visit_id: int = 0
-        self._last_bookmark_check: float = 0.0
+
+        # Bookmark tracking
+        self._bookmarks_path: Path | None = None
+        self._known_bookmark_urls: set[str] = set()
+        self._last_bookmark_mtime: float = 0.0
+
+        # Dwell time tracking
+        self._current_url: str | None = None
+        self._current_url_start: float = 0.0
 
     def _get_db_path(self) -> Path | None:
         if self._history_path and self._history_path.exists():
@@ -115,9 +136,17 @@ class BrowserMonitor:
         except Exception as e:
             logger.warning(f"Could not read latest visit ID: {e}")
 
+        # Initialize bookmark tracking
+        self._bookmarks_path = _get_chrome_bookmarks_path()
+        if self._bookmarks_path:
+            self._known_bookmark_urls = self._load_all_bookmark_urls()
+            self._last_bookmark_mtime = self._bookmarks_path.stat().st_mtime
+            logger.info(f"Bookmark monitoring: {len(self._known_bookmark_urls)} existing bookmarks")
+
         try:
             while self._running:
                 await self._poll_new_visits(db_path, event_queue)
+                await self._poll_new_bookmarks(event_queue)
                 await asyncio.sleep(self.poll_interval)
         except asyncio.CancelledError:
             logger.info("Browser monitor cancelled")
@@ -279,6 +308,111 @@ class BrowserMonitor:
                 pass
 
         return events
+
+    # ── Bookmark Monitoring ────────────────────────────────
+
+    def _load_all_bookmark_urls(self) -> set[str]:
+        """Parse Chrome Bookmarks JSON and return all bookmark URLs."""
+        if not self._bookmarks_path or not self._bookmarks_path.exists():
+            return set()
+        try:
+            import json
+            data = json.loads(self._bookmarks_path.read_text(encoding="utf-8"))
+            urls: set[str] = set()
+            self._walk_bookmarks(data.get("roots", {}), urls)
+            return urls
+        except Exception as e:
+            logger.warning(f"Error reading bookmarks: {e}")
+            return set()
+
+    def _walk_bookmarks(self, node: dict, urls: set[str]) -> None:
+        """Recursively walk bookmark tree and collect URLs."""
+        if isinstance(node, dict):
+            if node.get("type") == "url":
+                urls.add(node.get("url", ""))
+            for child in node.get("children", []):
+                self._walk_bookmarks(child, urls)
+            # Walk root folders (bookmark_bar, other, synced)
+            for key in ("bookmark_bar", "other", "synced"):
+                if key in node:
+                    self._walk_bookmarks(node[key], urls)
+
+    async def _poll_new_bookmarks(self, event_queue: asyncio.Queue) -> None:
+        """Check if Chrome Bookmarks file changed, emit events for new ones."""
+        if not self._bookmarks_path or not self._bookmarks_path.exists():
+            return
+
+        try:
+            mtime = self._bookmarks_path.stat().st_mtime
+            if mtime <= self._last_bookmark_mtime:
+                return
+
+            self._last_bookmark_mtime = mtime
+            current_urls = self._load_all_bookmark_urls()
+            new_urls = current_urls - self._known_bookmark_urls
+
+            for url in new_urls:
+                # Try to find the title from bookmark data
+                title = self._find_bookmark_title(url)
+                browser_data = BrowserEvent(
+                    url=url,
+                    title=title or url,
+                    visit_time=time.time(),
+                    action="bookmarked",
+                )
+                event = InputEvent(
+                    source="chrome_history",
+                    category=EventCategory.BEHAVIORAL,
+                    nature=EventNature.DISCRETE,
+                    event_type="url_bookmarked",
+                    data=browser_data.model_dump(),
+                )
+                await event_queue.put(event)
+                logger.info(f"New bookmark: {title or url[:60]}")
+
+            self._known_bookmark_urls = current_urls
+
+        except Exception as e:
+            logger.warning(f"Error polling bookmarks: {e}")
+
+    def _find_bookmark_title(self, url: str) -> str:
+        """Find title for a bookmark URL from the JSON data."""
+        try:
+            import json
+            data = json.loads(self._bookmarks_path.read_text(encoding="utf-8"))
+            return self._search_title(data.get("roots", {}), url) or ""
+        except Exception:
+            return ""
+
+    def _search_title(self, node: dict, target_url: str) -> str | None:
+        if isinstance(node, dict):
+            if node.get("type") == "url" and node.get("url") == target_url:
+                return node.get("name", "")
+            for child in node.get("children", []):
+                result = self._search_title(child, target_url)
+                if result:
+                    return result
+            for key in ("bookmark_bar", "other", "synced"):
+                if key in node:
+                    result = self._search_title(node[key], target_url)
+                    if result:
+                        return result
+        return None
+
+    # ── Dwell Time ───────────────────────────────────────
+
+    def _update_dwell_time(self, events: list[InputEvent]) -> None:
+        """Track how long user stays on each page. Update events with dwell_time."""
+        for event in events:
+            url = event.data.get("url", "")
+            now = time.time()
+
+            if self._current_url and self._current_url != url:
+                # User navigated away — calculate dwell on previous page
+                pass  # dwell was already computed by Chrome's visit_duration
+
+            self._current_url = url
+            self._current_url_start = now
 
     async def stop(self) -> None:
         """Stop monitoring."""

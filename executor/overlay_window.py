@@ -11,10 +11,12 @@ Overlay Window Process — 独立运行的 AppKit 进程。
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
 import threading
+import signal
 
 import objc
 from Foundation import NSObject, NSTimer, NSData
@@ -62,8 +64,17 @@ class FeedbackHandler(NSObject):
         body = message.body()
         try:
             feedback_type = body["type"]
-            card_id = body["card_id"]
+            card_id = body.get("card_id", "")
         except (KeyError, TypeError):
+            return
+
+        # Handle URL open requests — open in default browser
+        if feedback_type == "open_url":
+            url = body.get("url", "")
+            if url:
+                from AppKit import NSWorkspace
+                from Foundation import NSURL
+                NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(url))
             return
 
         send_feedback(feedback_type, card_id)
@@ -123,6 +134,19 @@ def get_active_window_info() -> dict:
 
 def html_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def linkify(escaped_html: str) -> str:
+    """Convert markdown-style [text](url) links in already-escaped HTML to clickable anchors."""
+    import re
+    # Match [text](url) in escaped HTML — brackets/parens are not escaped by html_escape
+    # Use jarvis message handler to open URL in default browser
+    return re.sub(
+        r'\[([^\]]+)\]\((https?://[^)]+)\)',
+        r'<a href="#" style="color:#6ea8fe;text-decoration:underline;cursor:pointer;" '
+        r'onclick="openUrl(\'\2\');return false;">\1</a>',
+        escaped_html,
+    )
 
 
 # ── Thinking Panel ───────────────────────────────────────
@@ -277,7 +301,7 @@ def build_html(data: dict) -> str:
     }
     label = type_labels.get(card_type, "Info")
 
-    body_html = body.replace('\n', '<br>')
+    body_html = linkify(body).replace('\n', '<br>')
 
     return f'''<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
@@ -354,6 +378,17 @@ function sendFeedback(type) {{
             card_id: "{card_id}"
         }});
     }} catch(e) {{}}
+}}
+function openUrl(url) {{
+    try {{
+        window.webkit.messageHandlers.jarvis.postMessage({{
+            type: "open_url",
+            url: url,
+            card_id: "{card_id}"
+        }});
+    }} catch(e) {{
+        window.location.href = url;
+    }}
 }}
 </script>
 </body></html>'''
@@ -437,12 +472,24 @@ def stdin_reader():
                 cmd_buffer.append(cmd)
         except json.JSONDecodeError:
             pass
+    # stdin closed → parent died, schedule quit
+    with cmd_lock:
+        cmd_buffer.append({"action": "quit"})
 
 
 # ── Main: AppKit Event Loop ──────────────────────────────
 
 def main():
     global thinking_ref
+
+    _parent_pid = os.getppid()
+
+    # Handle SIGINT/SIGTERM gracefully
+    def _signal_quit(signum, frame):
+        with cmd_lock:
+            cmd_buffer.append({"action": "quit"})
+    signal.signal(signal.SIGINT, _signal_quit)
+    signal.signal(signal.SIGTERM, _signal_quit)
 
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(0)
@@ -455,6 +502,11 @@ def main():
         @objc.typedSelector(b"v@:@")
         def tick_(self, timer):
             global thinking_ref
+
+            # If parent process died, quit immediately
+            if os.getppid() != _parent_pid:
+                with cmd_lock:
+                    cmd_buffer.append({"action": "quit"})
 
             with cmd_lock:
                 cmds = list(cmd_buffer)

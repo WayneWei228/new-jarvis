@@ -25,6 +25,7 @@ import subprocess
 import time
 import uuid
 
+import anthropic
 from google import genai
 from google.genai import types as gtypes
 
@@ -115,6 +116,7 @@ SYSTEM_PROMPT_BASE = """\
 多观察，少说话，多做事。
 一次有用的 execute 比十次 reply 更有价值。
 宁可沉默十轮，也不要说一句废话。
+
 """
 
 SYSTEM_PROMPT_OUTPUT = """\
@@ -187,11 +189,15 @@ class Reactor:
         overlay: NativeOverlay,
         memory_dir: str = "memory",
         tick_interval: float = 3.0,
+        profile: str = "",
     ):
         self.collector = collector
         self.overlay = overlay
         self.memory = MemoryStore(memory_dir=memory_dir)
         self.tick_interval = tick_interval
+
+        # Load user profile
+        self._profile = self._load_profile(profile)
         self._running = False
         self._react_round = 0
         self._last_act_time = 0
@@ -204,14 +210,68 @@ class Reactor:
         self._feedback_count_since_learn = 0
         self._last_learn_time = 0
 
-        # Gemini client
+        # Gemini client (observation)
         self._gemini = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+
+        # Anthropic client (execution, if needed)
+        # self._opus = anthropic.AnthropicBedrock(aws_region=os.environ.get("AWS_REGION", "ap-northeast-1"))
 
         # Tick overlap protection
         self._tick_in_progress = False
 
         # Lazy-load Pillow for image compression
         self._pil_available = None
+
+        # Designer workflow: accumulated bookmarks for trigger detection
+        self._design_bookmarks: list[dict] = []
+        self._design_doc_triggered = False
+
+        # Conversation history — rolling log of Jarvis actions/replies visible to Gemini
+        self._conversation_history: list[dict] = []  # {time, role, text}
+        self._history_max = 30  # keep last 30 entries
+
+    @staticmethod
+    def _load_profile(name: str) -> dict:
+        """Load a user profile from profiles/<name>.json."""
+        if not name:
+            return {}
+        from pathlib import Path
+        profile_path = Path(__file__).parent / "profiles" / f"{name}.json"
+        if profile_path.exists():
+            with open(profile_path, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+            logger.info(f"Profile loaded: {profile.get('name', name)}")
+            return profile
+        logger.warning(f"Profile not found: {profile_path}")
+        return {}
+
+    def _build_user_section(self) -> str:
+        """Build the '你对这个用户的了解' section from profile."""
+        if not self._profile:
+            return ""
+
+        lines = ["## 你对这个用户的了解\n"]
+
+        user = self._profile.get("user", {})
+        if user.get("role"):
+            lines.append(f"你知道他是{user['role']}。")
+        if user.get("context"):
+            lines.append(user["context"])
+        for habit in user.get("habits", []):
+            lines.append(f"你见过他的工作模式：{habit}")
+        for tool in user.get("tools", []):
+            lines.append(f"他{tool}。")
+
+        personality = self._profile.get("personality", {})
+        if personality.get("intuition"):
+            lines.append("\n作为朋友，你能做的：")
+            for item in personality["intuition"]:
+                lines.append(f"- {item}")
+        if personality.get("toolchain"):
+            lines.append(f"\n你了解他的工具链：{'、'.join(personality['toolchain'])}")
+
+        lines.append("\n这些不是规则，是你作为朋友的直觉。用你自己的判断。")
+        return "\n".join(lines)
 
     async def start(self) -> None:
         self._running = True
@@ -255,6 +315,11 @@ class Reactor:
         if snapshot["total_events"] == 0:
             return
 
+        # Check for new design bookmarks (accumulate across ticks)
+        await self._check_design_bookmark_trigger(snapshot)
+
+        # Record user speech to conversation history (deduplicated)
+        self._record_user_speech(snapshot)
 
         # Build multimodal content
         content = self._build_content(snapshot)
@@ -346,6 +411,64 @@ class Reactor:
                 {"text": f"观察: {reason[:50]}", "type": "decision"},
             ])
 
+    # ── Conversation History ────────────────────────────────
+
+    def _record_history(self, role: str, text: str, **extra) -> None:
+        """Append to rolling conversation history visible to Gemini."""
+        entry = {"time": time.time(), "role": role, "text": text}
+        entry.update(extra)
+        self._conversation_history.append(entry)
+        # Trim to max
+        if len(self._conversation_history) > self._history_max:
+            self._conversation_history = self._conversation_history[-self._history_max:]
+
+    def _format_history(self) -> str:
+        """Format recent history as text block for Gemini context."""
+        if not self._conversation_history:
+            return ""
+        now = time.time()
+        lines = []
+        for entry in self._conversation_history:
+            age = now - entry["time"]
+            if age > 1800:  # skip entries older than 30 min
+                continue
+            ago = f"{int(age)}秒前" if age < 60 else f"{int(age/60)}分钟前"
+            role = entry["role"]
+            text = entry["text"]
+            if role == "jarvis_reply":
+                lines.append(f"- [{ago}] 你回复了: {text[:100]}")
+            elif role == "jarvis_action":
+                lines.append(f"- [{ago}] 你执行了: {text[:150]}")
+            elif role == "user_speech":
+                lines.append(f"- [{ago}] 用户说: {text[:100]}")
+            elif role == "user_feedback":
+                lines.append(f"- [{ago}] 用户反馈: {text[:60]}")
+        if not lines:
+            return ""
+        return "[对话历史]\n" + "\n".join(lines[-15:])  # last 15 entries
+
+    _last_recorded_speech: set = set()
+
+    def _record_user_speech(self, snapshot: dict) -> None:
+        """Record final (confirmed) user speech to conversation history, deduplicated."""
+        transcriptions = snapshot["physiological"]["audio_transcriptions"]
+        if not transcriptions:
+            return
+        now = time.time()
+        for t in transcriptions[-5:]:
+            text = t.get("text", "").strip()
+            confidence = t.get("confidence", 1.0)
+            age = now - t.get("timestamp", 0)
+            # Only record confirmed speech, not in-progress
+            if text and len(text) > 3 and (confidence >= 0.9 or age > 2.0):
+                # Dedup by text content
+                if text not in self._last_recorded_speech:
+                    self._last_recorded_speech.add(text)
+                    self._record_history("user_speech", text)
+                    # Keep dedup set bounded
+                    if len(self._last_recorded_speech) > 50:
+                        self._last_recorded_speech = set(list(self._last_recorded_speech)[-30:])
+
     # ── Direct Reply (fast, no Claude Code) ────────────────
 
     async def _direct_reply(self, reply_text: str, reason: str) -> None:
@@ -359,6 +482,7 @@ class Reactor:
             card_type="result", card_id=card_id, timeout=30,
         )
         self._last_act_time = now
+        self._record_history("jarvis_reply", reply_text)
 
         self.overlay.push_thinking([
             {"text": f"直接回复 ({len(reply_text)}字)", "type": "action"},
@@ -372,6 +496,276 @@ class Reactor:
             "action": "direct_reply", "content": reply_text[:200],
             "trigger": "tick", "reason": reason, "card_id": card_id,
         })
+
+    # ── Designer Workflow Auto-Trigger ──────────────────
+
+    async def _check_design_bookmark_trigger(self, snapshot: dict) -> None:
+        """Accumulate design bookmarks across ticks. Auto-trigger Feishu doc when threshold hit."""
+        if self._design_doc_triggered:
+            return
+
+        workflow = self._profile.get("workflow", {})
+        if not workflow.get("enabled"):
+            return
+
+        design_sites = workflow.get("design_sites", [])
+        threshold = workflow.get("bookmark_threshold", 3)
+
+        # Check new bookmarks from this tick's snapshot
+        new_bookmarks = snapshot["behavioral"].get("browser_bookmarks", [])
+        for bm in new_bookmarks:
+            url = bm.get("url", "")
+            title = bm.get("title", "")
+            # Check if already tracked
+            if any(b["url"] == url for b in self._design_bookmarks):
+                continue
+            # Accept ALL bookmarks (not just design sites) — user is curating
+            self._design_bookmarks.append({"url": url, "title": title, "timestamp": bm.get("timestamp", time.time())})
+            logger.info(f"[DESIGNER] Bookmark tracked: {title[:40]} ({len(self._design_bookmarks)}/{threshold})")
+
+        # Also check wider window for bookmarks we may have missed
+        wide_snapshot = self.collector.get_snapshot(window_sec=300.0)
+        for bm in wide_snapshot["behavioral"].get("browser_bookmarks", []):
+            url = bm.get("url", "")
+            title = bm.get("title", "")
+            if any(b["url"] == url for b in self._design_bookmarks):
+                continue
+            self._design_bookmarks.append({"url": url, "title": title, "timestamp": bm.get("timestamp", time.time())})
+
+        if len(self._design_bookmarks) >= threshold:
+            logger.info(f"[DESIGNER] {len(self._design_bookmarks)} bookmarks accumulated, triggering doc")
+            self._design_doc_triggered = True
+            await self._trigger_design_feishu_doc()
+
+    async def _trigger_design_feishu_doc(self) -> None:
+        """Create one Feishu doc per bookmark, show all links, auto-open."""
+        bookmarks = self._design_bookmarks
+        card_id = uuid.uuid4().hex[:8]
+        now = time.time()
+
+        titles = "、".join(b["title"][:15] for b in bookmarks[:3])
+        self.overlay.push_thinking([
+            {"text": f"他收藏了好几个灵感 ({titles}...)，帮他整理一下", "type": "reason"},
+        ])
+        self.overlay.close_all()
+        self.overlay.show_card(
+            title="帮你整理灵感中...", body=f"正在逐个分析 {len(bookmarks)} 个收藏",
+            card_type="thinking", card_id=f"tmp_{card_id}", timeout=180,
+        )
+
+        # Create one doc per bookmark (blocking)
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, self._create_per_bookmark_docs, bookmarks)
+
+        # Clear bookmarks from content so Gemini doesn't re-trigger
+        self._design_bookmarks.clear()
+
+        self.overlay.close_all()
+        success = [r for r in results if r.get("doc_url")]
+        if success:
+            lines = [f"整理好了 {len(success)} 个灵感文档:\n"]
+            for r in success:
+                lines.append(f"[{r['title']}]({r['doc_url']})")
+            body = self._make_urls_clickable("\n".join(lines))
+            self.overlay.show_card(
+                title="灵感整理完成", body=body,
+                card_type="result", card_id=card_id, timeout=90,
+            )
+            # Auto-open all docs & record to history
+            for r in success:
+                subprocess.Popen(["open", r["doc_url"]])
+                self._record_history(
+                    "jarvis_action",
+                    f"为「{r['title']}」创建了飞书灵感文档: {r['doc_url']}",
+                    doc_url=r["doc_url"], doc_title=r["title"],
+                )
+            logger.info(f"[DESIGNER] {len(success)} docs created and opened")
+        else:
+            self.overlay.show_card(
+                title="整理失败", body="飞书文档创建出了点问题",
+                card_type="warning", card_id=card_id, timeout=30,
+            )
+
+        self._last_act_time = time.time()
+        self._card_contexts[card_id] = {
+            "action": "design_feishu_doc", "content": f"{len(success)} docs",
+            "trigger": "bookmarks", "time": now,
+        }
+
+    def _create_per_bookmark_docs(self, bookmarks: list[dict]) -> list[dict]:
+        """Create one Feishu doc per bookmark using ThreadPool for parallelism."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        cwd = os.path.dirname(__file__) or "."
+
+        def process_one(bm: dict) -> dict:
+            url = bm["url"]
+            title = bm["title"]
+            logger.info(f"[DESIGNER] Processing: {title}")
+            screenshot_path = None
+            tmp_md = None
+
+            try:
+                # Phase 1: Fetch content + screenshot in parallel via threads
+                content = self._fetch_url_content(url)
+                screenshot_path = self._take_screenshot(url, title)
+
+                # Phase 2: Gemini analysis (with screenshot image for JS-heavy pages)
+                markdown = self._gemini_analyze(content, title, url, screenshot_path)
+                if not markdown:
+                    return {"title": title, "doc_url": None}
+
+                # Phase 3: Create Feishu doc
+                tmp_md = os.path.join(cwd, f"_tmp_{uuid.uuid4().hex[:6]}.md")
+                with open(tmp_md, "w", encoding="utf-8") as f:
+                    f.write(markdown)
+
+                r = subprocess.run(
+                    ["lark-cli", "docs", "+create", "--as", "user",
+                     "--title", f"{title} - 灵感分析",
+                     "--markdown", f"@{os.path.basename(tmp_md)}"],
+                    capture_output=True, text=True, timeout=30, cwd=cwd,
+                )
+                if r.returncode != 0:
+                    logger.error(f"lark-cli failed for {title}: {r.stderr[:100]}")
+                    return {"title": title, "doc_url": None}
+
+                out = json.loads(r.stdout)
+                doc_url = out.get("data", {}).get("doc_url", "")
+                doc_id = out.get("data", {}).get("doc_id", "")
+
+                # Phase 4: Insert screenshot
+                if doc_id and screenshot_path and os.path.exists(screenshot_path):
+                    import shutil
+                    ss_name = f"_ss_{uuid.uuid4().hex[:6]}.png"
+                    ss_dest = os.path.join(cwd, ss_name)
+                    shutil.copy2(screenshot_path, ss_dest)
+                    subprocess.run(
+                        ["lark-cli", "docs", "+media-insert", "--as", "user",
+                         "--doc", doc_id, "--file", ss_name,
+                         "--type", "image", "--align", "center",
+                         "--caption", title[:50]],
+                        capture_output=True, timeout=60, cwd=cwd,
+                    )
+                    try:
+                        os.unlink(ss_dest)
+                    except OSError:
+                        pass
+
+                logger.info(f"[DESIGNER] Doc created: {title} → {doc_url}")
+                return {"title": title, "doc_url": doc_url}
+
+            except Exception as e:
+                logger.error(f"Doc creation failed for {title}: {e}")
+                return {"title": title, "doc_url": None}
+            finally:
+                for p in [tmp_md, screenshot_path]:
+                    if p and os.path.exists(p):
+                        try:
+                            os.unlink(p)
+                        except OSError:
+                            pass
+
+        # Process all bookmarks in parallel (max 3 concurrent)
+        results = []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {pool.submit(process_one, bm): bm for bm in bookmarks}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Sort results to match original bookmark order
+        bm_order = {bm["url"]: i for i, bm in enumerate(bookmarks)}
+        results.sort(key=lambda r: bm_order.get(
+            next((bm["url"] for bm in bookmarks if bm["title"] == r["title"]), ""), 99
+        ))
+        return results
+
+    def _gemini_analyze(self, content: str, title: str, url: str, screenshot_path: str | None) -> str | None:
+        """Generate Lark markdown via Gemini Flash. Sends screenshot as image for JS-heavy pages."""
+        text_prompt = f"""为以下网页生成一份 Lark-flavored Markdown 设计灵感分析文档。
+
+标题: {title}
+URL: {url}
+页面内容:
+{content[:3000] if content else '(JS渲染页面，请根据截图分析)'}
+
+要求：
+1. 开头 <callout> 概述这个作品的核心设计亮点
+2. 基础信息（标题、URL、平台）用 <callout emoji="📋" background-color="light-green">
+3. 详细分析：视觉风格、配色方案、布局结构、交互设计、技术栈
+4. <callout emoji="💡" background-color="light-yellow"> 技术要点和可借鉴之处
+5. 尾部 <callout emoji="🔗" background-color="light-purple"> 原始链接
+
+只输出 Lark Markdown，不要代码块包裹。"""
+
+        # Build multimodal parts — include screenshot for visual analysis
+        parts = [gtypes.Part(text=text_prompt)]
+        if screenshot_path and os.path.exists(screenshot_path):
+            try:
+                with open(screenshot_path, "rb") as f:
+                    img_data = f.read()
+                parts.insert(0, gtypes.Part(
+                    inline_data=gtypes.Blob(mime_type="image/png", data=img_data)
+                ))
+            except Exception:
+                pass
+
+        # Retry on transient SSL/network errors
+        for attempt in range(3):
+            try:
+                resp = self._gemini.models.generate_content(
+                    model=OBSERVE_MODEL,
+                    contents=[gtypes.Content(role="user", parts=parts)],
+                    config=gtypes.GenerateContentConfig(max_output_tokens=4000, temperature=0.3),
+                )
+                return resp.text
+            except Exception as e:
+                if attempt < 2 and any(k in str(e) for k in ("SSL", "EOF", "Connection", "reset")):
+                    logger.warning(f"Gemini retry {attempt+1}/2 for {title}: {e}")
+                    time.sleep(2)
+                    continue
+                logger.error(f"Gemini failed for {title}: {e}")
+                return None
+
+    def _fetch_url_content(self, url: str) -> str:
+        """Fetch URL content via curl. Blocking."""
+        try:
+            result = subprocess.run(
+                ["curl", "-sL", "--max-time", "10", url],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0 and result.stdout:
+                # Strip HTML tags for a rough text extraction
+                import re
+                text = re.sub(r'<script[^>]*>.*?</script>', '', result.stdout, flags=re.DOTALL)
+                text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+                text = re.sub(r'<[^>]+>', ' ', text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                return text[:3000]
+        except Exception:
+            pass
+        return ""
+
+    def _take_screenshot(self, url: str, title: str) -> str | None:
+        """Take headless Chrome screenshot. Blocking. Returns path or None."""
+        import tempfile
+        screenshot_path = tempfile.mktemp(suffix=".png", prefix="jarvis_ss_")
+        try:
+            result = subprocess.run(
+                ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                 "--headless", "--disable-gpu",
+                 f"--screenshot={screenshot_path}",
+                 "--window-size=1440,900",
+                 "--virtual-time-budget=8000",
+                 url],
+                capture_output=True, timeout=20,
+            )
+            if os.path.exists(screenshot_path) and os.path.getsize(screenshot_path) > 1000:
+                return screenshot_path
+        except Exception:
+            pass
+        if os.path.exists(screenshot_path):
+            os.unlink(screenshot_path)
+        return None
 
     # ── Execution (Claude Code / Opus) ───────────────────
 
@@ -408,6 +802,9 @@ class Reactor:
         if not body:
             body = execution_prompt
 
+        # Extract URLs and convert to clickable markdown links
+        body = self._make_urls_clickable(body)
+
         # Show result
         self.overlay.close_all()
         self.overlay.show_card(
@@ -415,6 +812,7 @@ class Reactor:
             card_type="result", card_id=card_id, timeout=45,
         )
         self._last_act_time = now
+        self._record_history("jarvis_action", f"{action}: {body[:150]}")
 
         self.overlay.push_thinking([
             {"text": f"Opus 完成 ({len(body)}字)", "type": "action"},
@@ -440,7 +838,7 @@ class Reactor:
             result = subprocess.run(
                 ["claude", "-p", prompt, "--output-format", "text",
                  "--dangerously-skip-permissions"],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=300,
             )
             output = result.stdout.strip()
             if result.returncode == 0 and output:
@@ -529,11 +927,21 @@ class Reactor:
             if parts:
                 content.append({"type": "text", "text": "\n".join(parts)})
 
-        # Browser
+        # Browser visits
         visits = snapshot["behavioral"]["browser_visits"]
         if visits:
-            lines = [f"- {v.get('title', '?')} ({v.get('url', '?')})" for v in visits[-2:]]
+            lines = [f"- {v.get('title', '?')} ({v.get('url', '?')})" for v in visits[-5:]]
             content.append({"type": "text", "text": "[浏览器]\n" + "\n".join(lines)})
+
+        # Browser bookmarks — use accumulated list from designer workflow tracking
+        if self._design_bookmarks:
+            bm_lines = [f"- {b['title']} ({b['url']})" for b in self._design_bookmarks[-10:]]
+            content.append({"type": "text", "text": f"[收藏] 用户已收藏 {len(self._design_bookmarks)} 个页面:\n" + "\n".join(bm_lines)})
+        else:
+            bookmarks = snapshot["behavioral"].get("browser_bookmarks", [])
+            if bookmarks:
+                bm_lines = [f"- {b.get('title', '?')} ({b.get('url', '?')})" for b in bookmarks[-10:]]
+                content.append({"type": "text", "text": f"[收藏] 用户最近收藏了 {len(bookmarks)} 个页面:\n" + "\n".join(bm_lines)})
 
         if not content:
             return []
@@ -684,16 +1092,77 @@ class Reactor:
     # ── System Prompt ────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
+        sections = [SYSTEM_PROMPT_BASE]
+
+        # User profile
+        user_section = self._build_user_section()
+        if user_section:
+            sections.append(user_section)
+
+        # Learned preferences
         prefs = self.memory.get_preferences()
         rules = prefs.get("rules", [])
-
         if rules:
             rules_text = "\n".join(f"- {r}" for r in rules)
-            section = f"\n## 用户偏好（从互动中学到的）\n\n{rules_text}\n\n偏好优先于默认假设。\n"
+            sections.append(f"\n## 用户偏好（从互动中学到的）\n\n{rules_text}\n\n偏好优先于默认假设。\n")
         else:
-            section = "\n## 用户偏好\n\n暂无。保持适度主动，通过反馈学习。\n"
+            sections.append("\n## 用户偏好\n\n暂无。保持适度主动，通过反馈学习。\n")
 
-        return SYSTEM_PROMPT_BASE + section + SYSTEM_PROMPT_OUTPUT
+        # Workflow state from profile
+        workflow_ctx = self._get_workflow_context()
+        if workflow_ctx:
+            sections.append(f"\n## 当前工作流状态\n\n{workflow_ctx}\n")
+
+        # Conversation history
+        history = self._format_history()
+        if history:
+            sections.append(f"\n{history}\n")
+
+        sections.append(SYSTEM_PROMPT_OUTPUT)
+        return "\n".join(sections)
+
+    def _get_workflow_context(self) -> str:
+        """Check recent activity against profile workflow config and return context hints."""
+        workflow = self._profile.get("workflow", {})
+        if not workflow.get("enabled"):
+            return ""
+
+        target_sites = workflow.get("design_sites", [])
+        threshold = workflow.get("bookmark_threshold", 3)
+
+        snapshot = self.collector.get_snapshot(window_sec=120.0)
+        bookmarks = snapshot["behavioral"].get("browser_bookmarks", [])
+        visits = snapshot["behavioral"].get("browser_visits", [])
+
+        # Count workflow-related bookmarks
+        related_bookmarks = [
+            bm for bm in bookmarks
+            if any(site in bm.get("url", "") for site in target_sites)
+        ]
+
+        # Count workflow-related visits
+        related_visits = [
+            v for v in visits
+            if any(site in v.get("url", "") for site in target_sites)
+        ]
+
+        # Check if user is viewing a Feishu doc
+        viewing_feishu = any(
+            "feishu.cn/docx" in v.get("url", "") or "larksuite.com/docx" in v.get("url", "")
+            for v in visits[-3:]
+        ) if visits else False
+
+        parts = []
+        if related_bookmarks:
+            parts.append(f"他收藏了 {len(related_bookmarks)} 个相关页面")
+            if len(related_bookmarks) >= threshold:
+                parts.append("收藏不少了，可以考虑帮他整理一下")
+        if related_visits:
+            parts.append(f"他一直在逛相关网站")
+        if viewing_feishu:
+            parts.append("他在看飞书文档 — 留意一下他对内容的反应")
+
+        return "\n".join(parts)
 
     # ── Feedback & Preference Learning ───────────────────────
 
@@ -787,6 +1256,30 @@ class Reactor:
                 ])
         except Exception as e:
             logger.error(f"Learn LLM failed: {e}")
+
+    # ── URL Processing ───────────────────────────────────────
+
+    @staticmethod
+    def _make_urls_clickable(text: str) -> str:
+        """Convert bare URLs in text to markdown [title](url) links for overlay."""
+        import re
+        # Don't touch URLs that are already in markdown link format
+        # Match bare URLs not already inside [...](...)
+        def replace_url(m):
+            url = m.group(0)
+            if "feishu.cn" in url or "larksuite.com" in url:
+                return f"[查看飞书文档]({url})"
+            return f"[打开链接]({url})"
+
+        # Skip URLs already in markdown links
+        parts = re.split(r'(\[[^\]]+\]\([^)]+\))', text)
+        result = []
+        for part in parts:
+            if part.startswith('[') and '](' in part:
+                result.append(part)  # Already a markdown link
+            else:
+                result.append(re.sub(r'https?://[^\s<>\'")\]]+', replace_url, part))
+        return ''.join(result)
 
     # ── Response Parsing ─────────────────────────────────────
 

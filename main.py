@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import asyncio
 import logging
 import os
@@ -36,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from input import InputCollector
 from executor import NativeOverlay
+from ws_bridge import ThinkingBridge
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,9 +65,13 @@ async def main(args):
     logger.info(f"  Browser: {'ON' if args.browser else 'OFF'}")
     logger.info("=" * 50)
 
-    # 1. Native Overlay
+    # 1. Native Overlay + WebSocket Bridge
     overlay = NativeOverlay()
     overlay.start()
+
+    bridge = ThinkingBridge(port=8765)
+    await bridge.start()
+    overlay.set_ws_bridge(bridge)
 
     # 2. Input Collector
     # In streaming mode, disable audio (StreamingReactor handles audio directly)
@@ -95,9 +101,13 @@ async def main(args):
             collector=collector,
             overlay=overlay,
             tick_interval=args.periodic,
+            profile=args.profile,
         )
 
-    # Handle Ctrl+C
+    # Ensure overlay is killed no matter how we exit
+    atexit.register(overlay.stop)
+
+    # Handle Ctrl+C / SIGTERM
     stop_event = asyncio.Event()
 
     def handle_signal():
@@ -107,6 +117,17 @@ async def main(args):
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, handle_signal)
+
+    # Handle Ctrl+Z (SIGTSTP) — clean up before suspending
+    def handle_tstp():
+        logger.info("\nSuspending — cleaning up overlay...")
+        overlay.stop()
+        atexit.unregister(overlay.stop)
+        # Re-raise SIGTSTP with default handler to actually suspend
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTSTP)
+
+    loop.add_signal_handler(signal.SIGTSTP, handle_tstp)
 
     # Start
     await collector.start()
@@ -119,16 +140,20 @@ async def main(args):
     reactor_task.cancel()
     await reactor.stop()
     await collector.stop()
+    await bridge.stop()
     overlay.stop()
+    atexit.unregister(overlay.stop)
     logger.info("Done.")
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Jarvis — Proactive AI Assistant")
 
-    # Mode
+    # Mode & Profile
     p.add_argument("--streaming", action="store_true", default=False,
                    help="Use OpenAI Realtime API for continuous streaming perception")
+    p.add_argument("--profile", type=str, default="",
+                   help="User profile to load from profiles/<name>.json (optional)")
 
     # Input toggles
     p.add_argument("--no-camera", dest="camera", action="store_false", default=True)

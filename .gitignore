@@ -16,8 +16,20 @@ executor/results/*.json
 memory/*.jsonl
 memory/preferences.json
 
+# User profiles (personal, not committed)
+profiles/
+
 # Env
 .env
+
+# Node
+node_modules/
+
+# Temp files
+a.py
+
+# Tests (scenario experiments)
+tests/
 
 # OS
 .DS_Store

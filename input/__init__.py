@@ -217,6 +217,7 @@ class InputCollector:
             "behavioral": {
                 "desktop_screenshots": [],
                 "browser_visits": [],
+                "browser_bookmarks": [],
             },
             "feedback": {
                 "execution_results": [],
@@ -243,13 +244,20 @@ class InputCollector:
                     "image_path": event.data.get("image_path"),
                 })
             elif event.source == "chrome_history":
-                snapshot["behavioral"]["browser_visits"].append({
-                    "timestamp": event.timestamp,
-                    "url": event.data.get("url"),
-                    "title": event.data.get("title"),
-                    "action": event.data.get("action"),
-                    "duration_sec": event.data.get("visit_duration_sec"),
-                })
+                if event.event_type == "url_bookmarked":
+                    snapshot["behavioral"]["browser_bookmarks"].append({
+                        "timestamp": event.timestamp,
+                        "url": event.data.get("url"),
+                        "title": event.data.get("title"),
+                    })
+                else:
+                    snapshot["behavioral"]["browser_visits"].append({
+                        "timestamp": event.timestamp,
+                        "url": event.data.get("url"),
+                        "title": event.data.get("title"),
+                        "action": event.data.get("action"),
+                        "duration_sec": event.data.get("visit_duration_sec"),
+                    })
             elif event.source == "executor":
                 snapshot["feedback"]["execution_results"].append({
                     "timestamp": event.timestamp,

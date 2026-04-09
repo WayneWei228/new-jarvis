@@ -33,6 +33,7 @@ class NativeOverlay:
         self._script = Path(__file__).parent / "overlay_window.py"
         self._feedback_buffer: list[dict] = []
         self._feedback_lock = threading.Lock()
+        self._ws_bridge = None
 
     def start(self):
         """Start the overlay window process."""
@@ -93,6 +94,10 @@ class NativeOverlay:
             "timeout": timeout,
         })
 
+    def set_ws_bridge(self, bridge):
+        """Attach a ThinkingBridge for broadcasting to web clients."""
+        self._ws_bridge = bridge
+
     def push_thinking(self, entries: list[dict]):
         """Push entries to the thinking log panel.
 
@@ -100,19 +105,36 @@ class NativeOverlay:
         """
         if entries:
             self._send({"action": "thinking", "entries": entries})
+            # Also broadcast to web clients
+            if self._ws_bridge:
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(self._ws_bridge.broadcast(entries))
+                    else:
+                        loop.run_until_complete(self._ws_bridge.broadcast(entries))
+                except RuntimeError:
+                    pass
 
     def close_all(self):
         self._send({"action": "close_all"})
 
     def stop(self):
         """Stop the overlay process."""
+        if not self._proc:
+            return
         self._send({"action": "quit"})
-        if self._proc:
+        try:
+            self._proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self._proc.terminate()
             try:
-                self._proc.wait(timeout=3)
+                self._proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
-            self._proc = None
+                self._proc.wait(timeout=1)
+        self._proc = None
         logger.info("Native overlay stopped")
 
     def _send(self, cmd: dict):
